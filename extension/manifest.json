@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge (Antigravity <-> Gemini 4 Argon)",
-  "version": "1.0.0",
-  "description": "Bridges local CLI / Google Antigravity with logged-in Web Gemini 4 Argon via ws://127.0.0.1:17420",
+  "name": "Argon Bridge v2.0 (1:1 Project-to-Chat Router)",
+  "version": "2.0.0",
+  "description": "Bridges local CLI / Google Antigravity with Web Gemini 4 Argon featuring 1:1 Project-to-Chat auto-routing",
   "permissions": [
     "tabs",
     "scripting",

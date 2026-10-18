@@ -1,7 +1,9 @@
 /**
- * Argon Bridge - Manifest V3 Background Service Worker
- * Maintains WebSocket connection to ws://127.0.0.1:17420 and routes payloads
- * between local ask_argon.js CLI and the active Gemini tab's content.js.
+ * Argon Bridge v2.0 - Background Service Worker & Stateful Session Router
+ * Handles:
+ * 1. Persistent WebSocket link to ws://127.0.0.1:17420
+ * 2. 1:1 Project-to-Chat Tab Routing (multi-tab matching or single-tab URL switching)
+ * 3. Pending task buffering across full-page navigations
  */
 
 const WS_URL = 'ws://127.0.0.1:17420';
@@ -13,13 +15,28 @@ let isConnecting = false;
 let reconnectTimer = null;
 const contentPorts = new Map(); // tabId -> Port
 
-function broadcastWsState(state, detail = '') {
+// 当触发页面 URL 跳转切流时，暂存待执行的提问任务，等待目标页面 content.js 就绪后立刻投递
+let pendingNavigationTask = null; // { tabId, taskPayload, createdAt }
+
+function extractChatIdFromUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return null;
+  const match = urlStr.match(/gemini\.google\.com\/(?:u\/\d+\/)?app\/([a-zA-Z0-9_-]+)/);
+  return match && match[1] ? match[1] : null;
+}
+
+function isCleanNewChatUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== 'string') return false;
+  return /gemini\.google\.com\/(?:u\/\d+\/)?app\/?(?:\?.*)?$/.test(urlStr);
+}
+
+function broadcastWsState(state, detail = '', projectInfo = null) {
   for (const [tabId, port] of contentPorts.entries()) {
     try {
       port.postMessage({
         type: 'BRIDGE_STATE',
         state,
         detail,
+        projectInfo,
         timestamp: Date.now(),
       });
     } catch (_) {
@@ -35,6 +52,18 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => {
     connectWebSocket();
   }, RECONNECT_INTERVAL_MS);
+}
+
+function sendToLocalCli(payload) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function connectWebSocket(force = false) {
@@ -64,7 +93,7 @@ function connectWebSocket(force = false) {
         socket.send(
           JSON.stringify({
             type: 'HELLO',
-            client: 'argon-bridge-mv3',
+            client: 'argon-bridge-mv3-v2',
             timestamp: Date.now(),
           })
         );
@@ -80,10 +109,9 @@ function connectWebSocket(force = false) {
       }
 
       if (data.type === 'ASK_ARGON') {
-        broadcastWsState('WORKING', '收到本地提问，正在驱动 Argon...');
-        await forwardTaskToGeminiTab(data);
+        await routeAndExecuteTask(data);
       } else if (data.type === 'ACK') {
-        broadcastWsState('CONNECTED', '回复已送达本地 CLI');
+        broadcastWsState('CONNECTED', `已完成 [${data.projectName || '项目'}] 回复同步`);
       }
     };
 
@@ -102,38 +130,20 @@ function connectWebSocket(force = false) {
       ws = null;
       scheduleReconnect();
     };
-  } catch (err) {
+  } catch (_) {
     isConnecting = false;
     ws = null;
     scheduleReconnect();
   }
 }
 
-function sendToLocalCli(payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify(payload));
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-  return false;
-}
-
-async function findTargetGeminiTab() {
-  // 1. 优先使用已建立长连接且当前激活的 Gemini 标签页
+/**
+ * 核心 1:1 会话路由器：
+ * 根据 taskPayload 中的 chatId / forceNewChat 决定直接投递还是切流跳转
+ */
+async function routeAndExecuteTask(taskPayload) {
   const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
   if (!tabs || tabs.length === 0) {
-    return null;
-  }
-  const activeTab = tabs.find((t) => t.active) || tabs[0];
-  return activeTab;
-}
-
-async function forwardTaskToGeminiTab(taskPayload) {
-  const tab = await findTargetGeminiTab();
-  if (!tab || !tab.id) {
     sendToLocalCli({
       type: 'ERROR',
       requestId: taskPayload.requestId,
@@ -142,29 +152,96 @@ async function forwardTaskToGeminiTab(taskPayload) {
     return;
   }
 
-  const port = contentPorts.get(tab.id);
+  const targetChatId = taskPayload.forceNewChat ? null : taskPayload.chatId;
+  const projectLabel = taskPayload.projectName || '未命名项目';
+
+  // 情况 1：该项目已绑定专属 chatId
+  if (targetChatId) {
+    // 1a. 检查是否已经有打开的标签页正好停留在该 chatId
+    const matchedTab = tabs.find((t) => extractChatIdFromUrl(t.url) === targetChatId);
+    if (matchedTab && matchedTab.id) {
+      sendToLocalCli({
+        type: 'STATUS',
+        status: `已命中项目 [${projectLabel}] 的专属会话标签页`,
+        detail: `chatId: ${targetChatId}`,
+      });
+      await dispatchTaskToTab(matchedTab.id, taskPayload);
+      return;
+    }
+
+    // 1b. 没有现成匹配的标签页 -> 选择当前激活（或第一个）Gemini 标签页，自动切流跳转到目标专属会话 URL
+    const tabToSwitch = tabs.find((t) => t.active) || tabs[0];
+    const targetUrl = `https://gemini.google.com/app/${targetChatId}`;
+
+    sendToLocalCli({
+      type: 'STATUS',
+      status: `正在为项目 [${projectLabel}] 自动切流至专属会话...`,
+      detail: targetUrl,
+    });
+
+    pendingNavigationTask = {
+      tabId: tabToSwitch.id,
+      taskPayload,
+      createdAt: Date.now(),
+    };
+
+    await chrome.tabs.update(tabToSwitch.id, { url: targetUrl });
+    return;
+  }
+
+  // 情况 2：新项目首次提问 或 显式指定 --new-chat
+  const activeTab = tabs.find((t) => t.active) || tabs[0];
+
+  // 如果当前标签页已经是干净的 /app 新会话页且没有强制刷新需求，先交由 content.js 判断或直接新建
+  if (isCleanNewChatUrl(activeTab.url) && !taskPayload.forceNewChat) {
+    sendToLocalCli({
+      type: 'STATUS',
+      status: `正在为项目 [${projectLabel}] 初始化专属新会话...`,
+      detail: 'https://gemini.google.com/app',
+    });
+    await dispatchTaskToTab(activeTab.id, taskPayload);
+    return;
+  }
+
+  // 否则驱动标签页跳转到干净的 https://gemini.google.com/app 开启全新会话
+  sendToLocalCli({
+    type: 'STATUS',
+    status: `正在为项目 [${projectLabel}] 切换至全新 Gemini 会话窗口...`,
+    detail: 'https://gemini.google.com/app',
+  });
+
+  pendingNavigationTask = {
+    tabId: activeTab.id,
+    taskPayload,
+    createdAt: Date.now(),
+  };
+
+  await chrome.tabs.update(activeTab.id, { url: 'https://gemini.google.com/app' });
+}
+
+async function dispatchTaskToTab(tabId, taskPayload) {
+  const port = contentPorts.get(tabId);
   if (port) {
     try {
       port.postMessage(taskPayload);
       return;
     } catch (_) {
-      contentPorts.delete(tab.id);
+      contentPorts.delete(tabId);
     }
   }
 
-  // Fallback: chrome.tabs.sendMessage
   try {
-    await chrome.tabs.sendMessage(tab.id, taskPayload);
+    await chrome.tabs.sendMessage(tabId, taskPayload);
   } catch (err) {
     sendToLocalCli({
       type: 'ERROR',
       requestId: taskPayload.requestId,
-      error: `无法向 Gemini 页面注入指令 (${err.message})，请刷新 https://gemini.google.com 页面后重试。`,
+      error: `无法向目标 Gemini 标签页投递任务 (${err.message})，请确认页面已加载完成。`,
     });
   }
 }
 
-// 监听来自 content.js 的长连接（同时保持 Service Worker 唤醒状态）
+// 监听来自 content.js 的长连接
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'argon-keepalive-port') return;
 
@@ -173,7 +250,6 @@ chrome.runtime.onConnect.addListener((port) => {
     contentPorts.set(tabId, port);
   }
 
-  // 立即同步当前 WebSocket 状态
   const isConnected = ws && ws.readyState === WebSocket.OPEN;
   port.postMessage({
     type: 'BRIDGE_STATE',
@@ -182,10 +258,18 @@ chrome.runtime.onConnect.addListener((port) => {
     timestamp: Date.now(),
   });
 
-  // 确保连接循环立即激活
   connectWebSocket(false);
 
-  port.onMessage.addListener((msg) => {
+  // 检查该 tabId 是否有因切流跳转而挂起的提问任务
+  if (tabId && pendingNavigationTask && pendingNavigationTask.tabId === tabId) {
+    const taskToRun = pendingNavigationTask.taskPayload;
+    pendingNavigationTask = null;
+    setTimeout(() => {
+      dispatchTaskToTab(tabId, taskToRun);
+    }, 600);
+  }
+
+  port.onMessage.addListener(async (msg) => {
     if (!msg || !msg.type) return;
 
     if (msg.type === 'HEARTBEAT') {
@@ -199,13 +283,27 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
 
-    if (msg.type === 'STATUS' || msg.type === 'RESPONSE' || msg.type === 'ERROR') {
+    if (msg.type === 'STATUS' || msg.type === 'ERROR') {
       sendToLocalCli(msg);
-      if (msg.type === 'RESPONSE') {
-        broadcastWsState('CONNECTED', '回复已发回本地终端');
-      } else if (msg.type === 'ERROR') {
-        broadcastWsState('ERROR', msg.error || '执行异常');
+      return;
+    }
+
+    if (msg.type === 'RESPONSE') {
+      // 将项目与会话映射同步备份至 chrome.storage.local
+      if (msg.projectKey && msg.chatId) {
+        try {
+          const store = await chrome.storage.local.get(['argonSessions']);
+          const sessions = store.argonSessions || {};
+          sessions[msg.projectKey] = {
+            projectName: msg.projectName,
+            chatId: msg.chatId,
+            chatUrl: msg.chatUrl,
+            updatedAt: Date.now(),
+          };
+          await chrome.storage.local.set({ argonSessions: sessions });
+        } catch (_) {}
       }
+      sendToLocalCli(msg);
     }
   });
 
@@ -216,7 +314,6 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// 监听一次性消息作为补充通道
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || !msg.type) return false;
 
@@ -235,7 +332,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// 定时闹钟保活兜底
 chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) {
@@ -243,5 +339,4 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-// 启动时立即尝试连接
 connectWebSocket(false);

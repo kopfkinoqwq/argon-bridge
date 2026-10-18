@@ -1,11 +1,10 @@
 /**
- * Argon Bridge - Content Script for https://gemini.google.com/*
- * Responsibilities:
- * 1. Render top-right floating HUD (Shadow DOM) with manual reconnect & status display
- * 2. Keep MV3 background service worker awake via persistent port + heartbeat
- * 3. Locate Gemini rich-textarea, inject prompt, and trigger Send button
- * 4. Detect streaming completion via MutationObserver + stability debounce
- * 5. Extract clean Markdown via Clipboard Write Hook (Copy button) + DOM-to-Markdown fallback
+ * Argon Bridge v2.0 - Content Script for https://gemini.google.com/*
+ * Features:
+ * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
+ * 2. Automatic waiting for rich-textarea readiness after session switching
+ * 3. In-page "New Chat" trigger if needed + URL Chat ID harvesting (/app/<chatId>)
+ * 4. Dual-engine clean Markdown extraction (Clipboard hook + DOM serializer)
  */
 
 (function () {
@@ -17,8 +16,13 @@
   let lastCapturedClipboardText = '';
   let lastCapturedClipboardTime = 0;
 
+  function getCurrentChatIdFromUrl() {
+    const match = window.location.pathname.match(/\/app\/([a-zA-Z0-9_-]+)/);
+    return match && match[1] ? match[1] : null;
+  }
+
   // =========================================================================
-  // 1. 注入主世界剪贴板拦截器 (绕过后台标签页 navigator.clipboard.readText 权限限制)
+  // 1. 注入主世界剪贴板拦截器
   // =========================================================================
   function injectClipboardInterceptor() {
     try {
@@ -38,7 +42,6 @@
               try {
                 return await origWriteText(text);
               } catch (_) {
-                // 即使后台标签页写入系统剪贴板失败，我们也已经通过 CustomEvent 拿到纯净 Markdown
                 return Promise.resolve();
               }
             };
@@ -70,12 +73,13 @@
   injectClipboardInterceptor();
 
   // =========================================================================
-  // 2. 右上角悬浮状态窗 (Shadow DOM)
+  // 2. 右上角悬浮状态窗 (含当前绑定项目与 Chat ID 显示)
   // =========================================================================
   const hudState = {
     host: null,
     dotEl: null,
     titleEl: null,
+    badgeEl: null,
     detailEl: null,
     reconnectBtn: null,
   };
@@ -85,8 +89,11 @@
 
     const host = document.createElement('div');
     host.id = 'argon-bridge-hud-host';
-    host.style.cssText = 'position: fixed; top: 14px; right: 18px; z-index: 2147483647; font-family: system-ui, -apple-system, sans-serif;';
+    host.style.cssText =
+      'position: fixed; top: 14px; right: 18px; z-index: 2147483647; font-family: system-ui, -apple-system, sans-serif;';
     const shadow = host.attachShadow({ mode: 'open' });
+
+    const initialChatId = getCurrentChatIdFromUrl();
 
     shadow.innerHTML = `
       <style>
@@ -94,20 +101,16 @@
           display: flex;
           align-items: center;
           gap: 10px;
-          background: rgba(17, 24, 39, 0.92);
+          background: rgba(17, 24, 39, 0.94);
           backdrop-filter: blur(10px);
           color: #f9fafb;
           padding: 8px 14px;
           border-radius: 999px;
-          border: 1px solid rgba(255, 255, 255, 0.14);
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
           font-size: 12px;
           line-height: 1.3;
-          transition: all 0.2s ease;
           user-select: none;
-        }
-        .hud-card:hover {
-          border-color: rgba(96, 165, 250, 0.5);
         }
         .status-dot {
           width: 9px;
@@ -116,23 +119,14 @@
           background: #9ca3af;
           flex-shrink: 0;
         }
-        .status-dot.STANDBY {
-          background: #f59e0b;
-          box-shadow: 0 0 8px #f59e0b;
-        }
-        .status-dot.CONNECTED {
-          background: #10b981;
-          box-shadow: 0 0 10px #10b981;
-        }
+        .status-dot.STANDBY { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+        .status-dot.CONNECTED { background: #10b981; box-shadow: 0 0 10px #10b981; }
         .status-dot.WORKING, .status-dot.CONNECTING {
           background: #3b82f6;
           box-shadow: 0 0 12px #3b82f6;
           animation: pulse 1s infinite alternate;
         }
-        .status-dot.ERROR {
-          background: #ef4444;
-          box-shadow: 0 0 10px #ef4444;
-        }
+        .status-dot.ERROR { background: #ef4444; box-shadow: 0 0 10px #ef4444; }
         @keyframes pulse {
           from { transform: scale(0.85); opacity: 0.7; }
           to { transform: scale(1.2); opacity: 1; }
@@ -140,11 +134,26 @@
         .text-col {
           display: flex;
           flex-direction: column;
-          max-width: 240px;
+          max-width: 280px;
+        }
+        .title-row {
+          display: flex;
+          align-items: center;
+          gap: 6px;
         }
         .title {
           font-weight: 600;
           color: #ffffff;
+          white-space: nowrap;
+        }
+        .project-badge {
+          background: rgba(16, 185, 129, 0.2);
+          color: #6ee7b7;
+          border: 1px solid rgba(16, 185, 129, 0.35);
+          padding: 1px 6px;
+          border-radius: 6px;
+          font-size: 10px;
+          font-family: monospace;
           white-space: nowrap;
         }
         .detail {
@@ -163,18 +172,20 @@
           font-size: 11px;
           font-weight: 500;
           cursor: pointer;
-          transition: all 0.15s ease;
           white-space: nowrap;
         }
         .btn-reconnect:hover {
-          background: rgba(59, 130, 246, 0.4);
+          background: rgba(59, 130, 246, 0.45);
           color: #ffffff;
         }
       </style>
       <div class="hud-card">
         <span class="status-dot STANDBY" id="dot"></span>
         <div class="text-col">
-          <span class="title" id="title">Argon Bridge</span>
+          <div class="title-row">
+            <span class="title" id="title">Argon Bridge v2</span>
+            <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
+          </div>
           <span class="detail" id="detail">初始化中...</span>
         </div>
         <button class="btn-reconnect" id="reconnectBtn" title="手动触发连接本地 17420 端口">立即连接</button>
@@ -186,6 +197,7 @@
     hudState.host = host;
     hudState.dotEl = shadow.getElementById('dot');
     hudState.titleEl = shadow.getElementById('title');
+    hudState.badgeEl = shadow.getElementById('badge');
     hudState.detailEl = shadow.getElementById('detail');
     hudState.reconnectBtn = shadow.getElementById('reconnectBtn');
 
@@ -201,16 +213,24 @@
     });
   }
 
-  function updateHud(state, titleText, detailText) {
+  function updateHud(state, titleText, detailText, badgeText = null) {
     createFloatingHud();
     if (!hudState.dotEl) return;
     hudState.dotEl.className = `status-dot ${state}`;
     if (titleText) hudState.titleEl.textContent = titleText;
     if (detailText) hudState.detailEl.textContent = detailText;
+    if (badgeText && hudState.badgeEl) {
+      hudState.badgeEl.textContent = badgeText;
+    } else if (hudState.badgeEl && !badgeText) {
+      const cid = getCurrentChatIdFromUrl();
+      if (cid && hudState.badgeEl.textContent === 'New Chat') {
+        hudState.badgeEl.textContent = `#${cid.slice(0, 8)}`;
+      }
+    }
   }
 
   // =========================================================================
-  // 3. 与 Background Service Worker 建立保活长连接
+  // 3. 与 Background Service Worker 建立长连接
   // =========================================================================
   function connectToBackground() {
     try {
@@ -225,10 +245,10 @@
             STANDBY: 'Argon Bridge: 待命',
             CONNECTED: 'Argon Bridge: 已连接',
             CONNECTING: 'Argon Bridge: 连接中',
-            WORKING: 'Argon Bridge: 正在向 Argon 提问...',
+            WORKING: 'Argon Bridge: 运行中',
             ERROR: 'Argon Bridge: 异常',
           };
-          updateHud(msg.state, labelMap[msg.state] || 'Argon Bridge', msg.detail || '');
+          updateHud(msg.state, labelMap[msg.state] || 'Argon Bridge v2', msg.detail || '');
           return;
         }
 
@@ -246,14 +266,12 @@
     }
   }
 
-  // Fallback message listener
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === 'ASK_ARGON') {
       handleAskArgonRequest(msg);
     }
   });
 
-  // 每 10 秒发送一次心跳，确保 MV3 Service Worker 永不休眠且持续轮询本地 CLI
   setInterval(() => {
     if (bgPort) {
       try {
@@ -276,8 +294,8 @@
     chrome.runtime.sendMessage(payload).catch(() => {});
   }
 
-  function reportStatus(status, detail = '') {
-    updateHud('WORKING', `Argon Bridge: ${status}`, detail);
+  function reportStatus(status, detail = '', badgeText = null) {
+    updateHud('WORKING', status, detail, badgeText);
     sendMessageToBackground({
       type: 'STATUS',
       status,
@@ -287,7 +305,7 @@
   }
 
   // =========================================================================
-  // 4. DOM 定位、输入注入、流式监控与 Markdown 提取
+  // 4. DOM 定位、跨会话等待、提问注入与 ChatID 提取
   // =========================================================================
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -307,6 +325,19 @@
       }
     }
     return null;
+  }
+
+  /**
+   * 当页面因切换项目会话刚完成跳转时，等待富文本输入框渲染就绪（最长 20 秒）
+   */
+  async function waitForInputReady(timeoutMs = 20000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const el = findInputElement();
+      if (el) return el;
+      await sleep(300);
+    }
+    throw new Error('等待 Gemini 页面输入框加载超时，请确认已登录 https://gemini.google.com');
   }
 
   function findSendButton() {
@@ -360,29 +391,53 @@
         return nodes;
       }
     }
-    // 兜底选择器
     return Array.from(document.querySelectorAll('.markdown'));
   }
 
-  async function injectPromptAndSend(promptText) {
-    const inputEl = findInputElement();
-    if (!inputEl) {
-      throw new Error('未找到 Gemini 网页版输入框，请确认当前页面已登录并停留在对话界面。');
+  /**
+   * 若需要新建会话但当前页面已有历史对话记录，尝试点击页面左上角的“发起新对话 (New chat)”按钮
+   */
+  async function ensureCleanNewChatIfRequired(forceNewChat) {
+    if (!forceNewChat) return;
+    const existingResponses = getModelResponseElements();
+    const currentCid = getCurrentChatIdFromUrl();
+    if (existingResponses.length === 0 && !currentCid) {
+      return;
     }
 
+    const newChatSelectors = [
+      'a[href="/app"]',
+      'a[href^="https://gemini.google.com/app"]',
+      'button[data-test-id="new-chat-button"]',
+      'button[aria-label*="New chat"]',
+      'button[aria-label*="新对话"]',
+      'button[aria-label*="发起新对话"]',
+    ];
+
+    for (const sel of newChatSelectors) {
+      const btn = document.querySelector(sel);
+      if (btn && btn.offsetParent !== null) {
+        btn.click();
+        await sleep(800);
+        return;
+      }
+    }
+  }
+
+  async function injectPromptAndSend(promptText) {
+    const inputEl = await waitForInputReady(20000);
+
     inputEl.focus();
-    await sleep(100);
+    await sleep(120);
 
     if (inputEl.tagName.toLowerCase() === 'textarea') {
       inputEl.value = promptText;
       inputEl.dispatchEvent(new Event('input', { bubbles: true }));
       inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
-      // 清空原有内容
       document.execCommand('selectAll', false, null);
       document.execCommand('delete', false, null);
 
-      // 优先使用 insertText 以触发 Angular/Quill 内部状态更新
       const inserted = document.execCommand('insertText', false, promptText);
       if (!inserted || !inputEl.innerText.trim()) {
         inputEl.innerHTML = '';
@@ -410,7 +465,6 @@
     if (sendBtn) {
       sendBtn.click();
     } else {
-      // 回车发送兜底
       inputEl.dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'Enter',
@@ -423,7 +477,7 @@
     }
   }
 
-  async function waitForGenerationComplete(initialCount, initialLastText, timeoutMs = 280000) {
+  async function waitForGenerationComplete(initialCount, initialLastText, projectName, timeoutMs = 280000) {
     const startTime = Date.now();
     let generationStarted = false;
     let lastMutationTime = Date.now();
@@ -457,7 +511,7 @@
           ) {
             generationStarted = true;
             lastMutationTime = Date.now();
-            reportStatus('Argon 思考与输出中...', '已检测到流式响应');
+            reportStatus(`Argon 正在回复 [${projectName}]`, '已检测到流式输出');
           }
           continue;
         }
@@ -466,16 +520,14 @@
           lastObservedText = currentText;
           lastMutationTime = Date.now();
           const elapsedSec = Math.round((Date.now() - startTime) / 1000);
-          reportStatus('正在接收流式输出...', `已生成 ${currentText.length} 字符 (${elapsedSec}s)`);
+          reportStatus(
+            `正在接收 [${projectName}] 回复...`,
+            `已生成 ${currentText.length} 字符 (${elapsedSec}s)`
+          );
         }
 
-        // 判断流式输出完成的条件：
-        // 1. 停止按钮已消失 (!stopVisible)
-        // 2. 最新回复非空 (currentText.length > 0)
-        // 3. DOM 内容已稳定静止超过 2600ms
         const quietDuration = Date.now() - lastMutationTime;
         if (!stopVisible && currentText.length > 0 && quietDuration >= 2600) {
-          // 二次确认：再等待 600ms 确保没有后续段落跳出
           await sleep(600);
           if (!isStopButtonVisible()) {
             return latestNode;
@@ -488,10 +540,22 @@
     }
   }
 
+  /**
+   * 首轮新会话生成后，等待地址栏 URL 从 /app 更新为 /app/<chatId>
+   */
+  async function waitForChatIdInUrl(maxWaitMs = 3500) {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const cid = getCurrentChatIdFromUrl();
+      if (cid) return cid;
+      await sleep(250);
+    }
+    return getCurrentChatIdFromUrl();
+  }
+
   function findCopyButtonForResponse(responseNode) {
     if (!responseNode) return null;
 
-    // 在当前 model-response 内部或父级容器查找“复制”按钮
     const scopes = [
       responseNode,
       responseNode.closest('model-response'),
@@ -511,7 +575,6 @@
     for (const scope of scopes) {
       for (const sel of copySelectors) {
         const btns = Array.from(scope.querySelectorAll(sel));
-        // 排除代码块内部的“复制代码”按钮，确保点击的是整条回答底部的复制按钮
         const validBtns = btns.filter((b) => !b.closest('pre') && !b.closest('code-block'));
         if (validBtns.length > 0) {
           return validBtns[validBtns.length - 1];
@@ -521,9 +584,6 @@
     return null;
   }
 
-  /**
-   * 高保真 DOM 转 Markdown 转换器（当复制按钮不可用时的强力兜底）
-   */
   function convertDomNodeToMarkdown(rootNode) {
     if (!rootNode) return '';
 
@@ -534,7 +594,6 @@
 
     const clone = container.cloneNode(true);
 
-    // 移除代码块顶部自带的语言栏与“复制代码”按钮，防止污染代码块内容
     const noiseSelectors = [
       '.code-block-decoration',
       '.code-header',
@@ -557,7 +616,6 @@
 
       const tag = node.tagName.toLowerCase();
 
-      // 处理代码块
       if (tag === 'pre') {
         const codeEl = node.querySelector('code');
         let lang = '';
@@ -573,32 +631,20 @@
         return `\`${node.textContent || ''}\``;
       }
 
-      // 处理标题
       if (/^h[1-6]$/.test(tag)) {
         const level = parseInt(tag.slice(1), 10);
         const hashes = '#'.repeat(level);
-        return `\n${hashes} ${ getChildrenText(node).trim() }\n\n`;
+        return `\n${hashes} ${getChildrenText(node).trim()}\n\n`;
       }
 
       if (tag === 'p') {
         return `${getChildrenText(node).trim()}\n\n`;
       }
 
-      if (tag === 'br') {
-        return '\n';
-      }
-
-      if (tag === 'hr') {
-        return '\n---\n\n';
-      }
-
-      if (tag === 'strong' || tag === 'b') {
-        return `**${getChildrenText(node)}**`;
-      }
-
-      if (tag === 'em' || tag === 'i') {
-        return `*${getChildrenText(node)}*`;
-      }
+      if (tag === 'br') return '\n';
+      if (tag === 'hr') return '\n---\n\n';
+      if (tag === 'strong' || tag === 'b') return `**${getChildrenText(node)}**`;
+      if (tag === 'em' || tag === 'i') return `*${getChildrenText(node)}*`;
 
       if (tag === 'blockquote') {
         const lines = getChildrenText(node).trim().split('\n');
@@ -660,7 +706,6 @@
   }
 
   async function extractCleanMarkdown(responseNode) {
-    // 方案 A：点击整条回复的“复制”按钮，通过剪贴板拦截器捕获官方原生 Markdown
     const copyBtn = findCopyButtonForResponse(responseNode);
     if (copyBtn) {
       const beforeClickTime = Date.now();
@@ -675,7 +720,6 @@
         };
       }
 
-      // 尝试直接读取剪贴板（当页面恰好处于激活状态时）
       try {
         const clipText = await navigator.clipboard.readText();
         if (clipText && clipText.trim().length > 0) {
@@ -687,7 +731,6 @@
       } catch (_) {}
     }
 
-    // 方案 B：使用内置高保真 DOM-to-Markdown 转换器
     const domMarkdown = convertDomNodeToMarkdown(responseNode);
     if (domMarkdown && domMarkdown.length > 0) {
       return {
@@ -696,7 +739,6 @@
       };
     }
 
-    // 方案 C：纯文本兜底
     return {
       markdown: (responseNode ? responseNode.innerText : '').trim(),
       source: 'innerText-fallback',
@@ -708,14 +750,25 @@
       sendMessageToBackground({
         type: 'ERROR',
         requestId: task.requestId,
-        error: '当前已有正在执行的 Argon 提问任务，请稍候重试。',
+        error: '当前页面正在执行另一个 Argon 提问任务，请稍候重试。',
       });
       return;
     }
 
     isProcessingTask = true;
+    const projectName = task.projectName || 'default';
+
     try {
-      reportStatus('正在向 Argon 提问...', `Request ID: ${task.requestId.slice(0, 8)}`);
+      await waitForInputReady(20000);
+
+      if (task.forceNewChat) {
+        await ensureCleanNewChatIfRequired(true);
+      }
+
+      const activeCid = getCurrentChatIdFromUrl();
+      const badgeLabel = `${projectName} · ${activeCid ? '#' + activeCid.slice(0, 6) : 'NEW'}`;
+
+      reportStatus(`正在向 [${projectName}] 专属会话提问...`, `Req: ${task.requestId.slice(0, 8)}`, badgeLabel);
 
       const existingResponses = getModelResponseElements();
       const initialCount = existingResponses.length;
@@ -723,28 +776,48 @@
         initialCount > 0 ? (existingResponses[initialCount - 1].innerText || '').trim() : '';
 
       await injectPromptAndSend(task.prompt);
-      reportStatus('已发送提问', '等待 Gemini 4 Argon 开始生成...');
+      reportStatus(`已发送 [${projectName}] 提问`, '等待 Gemini 4 Argon 响应...', badgeLabel);
 
-      const latestResponseNode = await waitForGenerationComplete(initialCount, initialLastText);
-      reportStatus('生成完毕', '正在提取纯净 Markdown...');
+      const latestResponseNode = await waitForGenerationComplete(
+        initialCount,
+        initialLastText,
+        projectName
+      );
+      reportStatus('生成完毕', '正在提取纯净 Markdown 与会话 ID...', badgeLabel);
 
       const { markdown, source } = await extractCleanMarkdown(latestResponseNode);
-
       if (!markdown) {
         throw new Error('提取到的回复内容为空。');
       }
 
+      // 捕获当前会话的 chatId（特别是新项目首轮对话刚分配的 URL）
+      const finalChatId = (await waitForChatIdInUrl(3500)) || task.chatId || null;
+      const finalChatUrl = finalChatId
+        ? `https://gemini.google.com/app/${finalChatId}`
+        : window.location.href;
+
+      const finalBadge = `${projectName} · ${finalChatId ? '#' + finalChatId.slice(0, 6) : 'BOUND'}`;
+
       sendMessageToBackground({
         type: 'RESPONSE',
         requestId: task.requestId,
+        projectKey: task.projectKey,
+        projectName,
+        chatId: finalChatId,
+        chatUrl: finalChatUrl,
         markdown,
         source,
         timestamp: Date.now(),
       });
 
-      updateHud('CONNECTED', 'Argon Bridge: 已完成', `已回传 ${markdown.length} 字符 (${source})`);
+      updateHud(
+        'CONNECTED',
+        `Argon Bridge: [${projectName}] 已完成`,
+        `已回传 ${markdown.length} 字符 (${source})`,
+        finalBadge
+      );
     } catch (err) {
-      updateHud('ERROR', 'Argon Bridge: 执行失败', err.message || '未知错误');
+      updateHud('ERROR', `Argon Bridge: [${projectName}] 失败`, err.message || '未知错误');
       sendMessageToBackground({
         type: 'ERROR',
         requestId: task.requestId,
@@ -755,7 +828,6 @@
     }
   }
 
-  // 初始化悬浮窗与后台连接
   createFloatingHud();
   connectToBackground();
 })();
