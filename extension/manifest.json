@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Argon Bridge (Antigravity <-> Gemini 4 Argon)",
+  "version": "1.0.0",
+  "description": "Bridges local CLI / Google Antigravity with logged-in Web Gemini 4 Argon via ws://127.0.0.1:17420",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "clipboardRead",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "http://127.0.0.1:17420/*",
+    "http://localhost:17420/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

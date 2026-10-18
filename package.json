@@ -1,0 +1,17 @@
+{
+  "name": "argon-bridge",
+  "version": "1.0.0",
+  "description": "Zero-bloat WebSocket bridge connecting local Antigravity CLI (Gemini 3.8 Flash) to logged-in Web Gemini 4 Argon",
+  "main": "ask_argon.js",
+  "scripts": {
+    "ask": "node ask_argon.js",
+    "test:ping": "node ask_argon.js \"请回复：Argon Bridge 链路连通测试成功，当前模型运行正常。\""
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
