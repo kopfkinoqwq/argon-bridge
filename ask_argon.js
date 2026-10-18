@@ -137,6 +137,9 @@ function main() {
   }
 
   wss.on('listening', () => {
+    process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
+    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon...        │\x1b[0m\n`);
+    process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
     logInfo(`本地 WebSocket 服务已启动: ws://127.0.0.1:${config.port}`);
     logInfo(`请求 ID: ${requestId} | 提问长度: ${config.prompt.length} 字符`);
     logInfo(`正在等待 Chrome 插件连接 (若未自动连接，请点击 Gemini 网页右上角状态球)...`);
@@ -205,6 +208,9 @@ function main() {
 
         const markdown = (msg.markdown || '').trim();
         const source = msg.source || 'unknown';
+        process.stderr.write(`\n\x1b[1;32m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
+        process.stderr.write(`\x1b[1;32m│  🏛️ 架构师蓝图已送达：云端 Gemini 4 Argon 输出完毕！          │\x1b[0m\n`);
+        process.stderr.write(`\x1b[1;32m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
         logSuccess(`已收到 Gemini 4 Argon 完整回复！(提取方式: ${source}, 长度: ${markdown.length} 字符)`);
 
         // 发送确认帧
