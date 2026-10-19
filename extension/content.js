@@ -433,45 +433,67 @@
     }
   }
 
-  function findModelDropdownTrigger() {
-    const allButtons = Array.from(document.querySelectorAll('button'));
-    for (const btn of allButtons) {
-      if (btn.offsetParent === null) continue;
-      const text = (btn.innerText || '').toLowerCase();
-      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const hasPopup = btn.getAttribute('aria-haspopup');
+  function simulateRealClick(el) {
+    if (!el) return;
+    const opts = { bubbles: true, cancelable: true, view: window };
+    el.dispatchEvent(new PointerEvent('pointerdown', opts));
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new PointerEvent('pointerup', opts));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.click();
+  }
 
-      // 匹配特征：具有弹窗菜单属性，且包含模型关键词 (Fast / Flash / Pro / Advanced / Thinking / 模型选择)
+  function findModelDropdownTrigger() {
+    // 1. 精确选择器：涵盖底部输入栏与顶部 bard-mode-switcher
+    const explicitSelectors = [
+      'bard-mode-switcher button',
+      '[data-test-id="bard-mode-menu-button"]',
+      'input-area-v2 button[aria-haspopup="menu"]',
+      'rich-textarea ~ * button[aria-haspopup="menu"]',
+      'button[aria-label*="model" i]',
+      'button[aria-label*="模型"]',
+      'button[aria-label*="模式"]',
+      '.input-area button[aria-haspopup="true"]',
+      '.input-area button[aria-expanded]',
+    ];
+
+    for (const sel of explicitSelectors) {
+      const btns = Array.from(document.querySelectorAll(sel));
+      for (const btn of btns) {
+        if (btn && btn.offsetParent !== null) {
+          const txt = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
+          if (/flash|argon|pro|advanced|deep think|gemini|\d\.\d/i.test(txt)) {
+            return btn;
+          }
+        }
+      }
+    }
+
+    // 2. 启发式探测：扫描可见按钮，定位模型代号按钮
+    const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    for (const btn of allButtons) {
+      if (!btn || btn.offsetParent === null) continue;
+      if (btn.closest('mat-sidenav') || btn.closest('pre') || btn.closest('model-response')) continue;
+
+      const text = (btn.innerText || '').replace(/\s+/g, ' ').trim();
       if (
-        (hasPopup === 'menu' || hasPopup === 'listbox' || aria.includes('model') || aria.includes('模型')) &&
-        (text.includes('fast') || text.includes('flash') || text.includes('pro') || text.includes('advanced') || text.includes('thinking') || aria.includes('model') || aria.includes('模型') || aria.includes('select') || aria.includes('switch'))
+        text.length > 0 &&
+        text.length <= 32 &&
+        /\b(flash|argon|pro|advanced|deep\s*think)\b/i.test(text)
       ) {
         return btn;
       }
     }
 
-    const candidateSelectors = [
-      'button[data-test-id*="model"]',
-      'button[aria-label*="model" i]',
-      'button[aria-label*="模型"]',
-      '.model-selector-dropdown',
-      'button[aria-haspopup="menu"]',
-    ];
-    for (const sel of candidateSelectors) {
-      const el = document.querySelector(sel);
-      if (el && el.offsetParent !== null) {
-        return el;
-      }
-    }
     return null;
   }
 
   /**
    * 智能模型检测与自动切换：
-   * 在新建会话或处于干净的 /app 页面时，自动检测当前模型是否为高阶模型（如 Pro / Advanced / Thinking）
+   * 在新建会话或处于干净的 /app 页面时，自动检测当前模型是否为高阶模型（如 Argon / Pro / Advanced / Thinking）
    * 若非高阶模型（如默认为 Flash / Fast），自动点击菜单完成切换，彻底解决默认模型偏离问题
    */
-  async function ensureTargetModel(targetModelKeywords = ['Pro', 'Advanced', 'Thinking', 'Argon']) {
+  async function ensureTargetModel(targetModelKeywords = ['Argon', 'Pro', 'Advanced', 'Thinking']) {
     try {
       const triggerBtn = findModelDropdownTrigger();
       if (!triggerBtn) return false;
@@ -487,49 +509,62 @@
       }
 
       // 当前处于 Flash / Fast 或未知普通模型，展开下拉菜单
-      triggerBtn.click();
+      simulateRealClick(triggerBtn);
       await sleep(350);
 
+      const overlayRoot = document.querySelector('.cdk-overlay-container') || document.body;
       const menuSelectors = [
-        '[role="menuitem"]',
+        'button[role="menuitem"]',
+        'button[role="menuitemradio"]',
         '[role="option"]',
         'mat-option',
         '.mat-mdc-menu-item',
-        'button.model-item',
-        'div[data-model-name]',
-        'button[data-test-id*="model"]',
+        '.bard-mode-list-button',
+        '.cdk-overlay-pane button',
       ];
 
       let targetOption = null;
       for (let i = 0; i < 12; i++) {
+        const items = [];
         for (const sel of menuSelectors) {
-          const items = Array.from(document.querySelectorAll(sel));
+          overlayRoot.querySelectorAll(sel).forEach((el) => {
+            if (el && el.offsetParent !== null && !items.includes(el)) {
+              items.push(el);
+            }
+          });
+        }
+
+        for (const kw of targetModelKeywords) {
+          const lowerKw = kw.toLowerCase();
           for (const item of items) {
-            const itemText = (item.innerText || '').toLowerCase();
-            const itemAria = (item.getAttribute('aria-label') || '').toLowerCase();
-            const fullItem = `${itemText} ${itemAria}`;
-            for (const kw of targetModelKeywords) {
-              if (fullItem.includes(kw.toLowerCase())) {
+            const itemText = (item.innerText || item.textContent || '').replace(/\s+/g, ' ').toLowerCase();
+            if (itemText.includes(lowerKw)) {
+              const isDisabled =
+                item.disabled ||
+                item.getAttribute('aria-disabled') === 'true' ||
+                item.classList.contains('mat-mdc-menu-item-disabled');
+              if (!isDisabled) {
                 targetOption = item;
                 break;
               }
             }
-            if (targetOption) break;
           }
           if (targetOption) break;
         }
+
         if (targetOption) break;
         await sleep(150);
       }
 
       if (targetOption) {
-        targetOption.click();
+        simulateRealClick(targetOption);
         await sleep(400);
-        reportStatus('模型自动锁定', '已将模型自动切换至高阶架构师模式 (Pro/Advanced)');
+        reportStatus('模型自动锁定', '已将模型自动切换至高阶架构师模式 (Argon/Pro)');
         return true;
       } else {
-        // 未匹配到则重新点击以收起菜单
-        triggerBtn.click();
+        // 未匹配到则按 Escape 键关闭浮层，避免遮挡
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(150);
       }
     } catch (_) {}
     return false;
