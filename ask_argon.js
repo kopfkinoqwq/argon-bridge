@@ -215,6 +215,7 @@ function parseArgs(argv) {
     cwd: null,
     chatId: null,
     newChat: false,
+    reload: false,
     bindTarget: null,
     listOnly: false,
     port: DEFAULT_PORT,
@@ -237,6 +238,8 @@ function parseArgs(argv) {
       config.chatId = args[++i];
     } else if (arg === '--new-chat' || arg === '-N' || arg === '--reset') {
       config.newChat = true;
+    } else if (arg === '--reload' || arg === '-r') {
+      config.reload = true;
     } else if (arg === '--bind') {
       config.bindTarget = args[++i];
     } else if (arg === '--list' || arg === '-l' || arg === '--list-sessions') {
@@ -380,6 +383,7 @@ function main() {
           chatId: projectCtx.chatId,
           chatUrl: projectCtx.chatUrl,
           forceNewChat: projectCtx.isNewChat,
+          reload: Boolean(config.reload),
           prompt: effectivePrompt,
           timestamp: Date.now(),
         })
@@ -462,8 +466,7 @@ function main() {
 
     ws.on('close', () => {
       if (!isCompleted) {
-        logWarn('Chrome 插件连接暂时断开，等待重连中...');
-        promptDispatched = false;
+        logWarn('Chrome 插件连接暂时断开，等待重连与响应回传...');
       }
     });
   });

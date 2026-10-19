@@ -160,6 +160,20 @@ async function routeAndExecuteTask(taskPayload) {
     // 1a. 检查是否已经有打开的标签页正好停留在该 chatId
     const matchedTab = tabs.find((t) => extractChatIdFromUrl(t.url) === targetChatId);
     if (matchedTab && matchedTab.id) {
+      if (taskPayload.reload) {
+        sendToLocalCli({
+          type: 'STATUS',
+          status: `正在强制刷新标签页以重新初始化脚本...`,
+          detail: `chatId: ${targetChatId}`,
+        });
+        pendingNavigationTask = {
+          tabId: matchedTab.id,
+          taskPayload: { ...taskPayload, reload: false },
+          createdAt: Date.now(),
+        };
+        await chrome.tabs.reload(matchedTab.id);
+        return;
+      }
       sendToLocalCli({
         type: 'STATUS',
         status: `已命中项目 [${projectLabel}] 的专属会话标签页`,

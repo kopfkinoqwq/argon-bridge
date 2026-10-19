@@ -365,15 +365,23 @@
       'button[aria-label*="Stop response"]',
       'button[aria-label*="Stop"]',
       'button[aria-label*="停止"]',
+      'button[aria-label*="中断"]',
       '.stop-icon',
+      'mat-icon[fonticon="stop"]',
+      'mat-icon[data-mat-icon-name="stop"]',
+      'button[data-test-id*="stop"]',
+      '.sparkle-generating',
+      '[data-is-generating="true"]',
     ];
     for (const sel of stopSelectors) {
-      const els = Array.from(document.querySelectorAll(sel));
-      for (const el of els) {
-        if (el && el.offsetParent !== null) {
-          return true;
+      try {
+        const els = Array.from(document.querySelectorAll(sel));
+        for (const el of els) {
+          if (el && el.offsetParent !== null) {
+            return true;
+          }
         }
-      }
+      } catch (_) {}
     }
     return false;
   }
@@ -392,6 +400,139 @@
       }
     }
     return Array.from(document.querySelectorAll('.markdown'));
+  }
+
+  function getUserQueryElements() {
+    const selectors = [
+      'user-query',
+      'div[data-message-author-role="user"]',
+      '.user-query-container',
+      '.user-query',
+    ];
+    for (const sel of selectors) {
+      const nodes = Array.from(document.querySelectorAll(sel));
+      if (nodes.length > 0) return nodes;
+    }
+    return [];
+  }
+
+  async function waitForHistorySettled(timeoutMs = 2500) {
+    const start = Date.now();
+    let lastCount = getModelResponseElements().length;
+    let stableTime = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      await sleep(250);
+      const curCount = getModelResponseElements().length;
+      if (curCount !== lastCount) {
+        lastCount = curCount;
+        stableTime = Date.now();
+      } else if (Date.now() - stableTime >= 600) {
+        break;
+      }
+    }
+  }
+
+  function findModelDropdownTrigger() {
+    const allButtons = Array.from(document.querySelectorAll('button'));
+    for (const btn of allButtons) {
+      if (btn.offsetParent === null) continue;
+      const text = (btn.innerText || '').toLowerCase();
+      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const hasPopup = btn.getAttribute('aria-haspopup');
+
+      // 匹配特征：具有弹窗菜单属性，且包含模型关键词 (Fast / Flash / Pro / Advanced / Thinking / 模型选择)
+      if (
+        (hasPopup === 'menu' || hasPopup === 'listbox' || aria.includes('model') || aria.includes('模型')) &&
+        (text.includes('fast') || text.includes('flash') || text.includes('pro') || text.includes('advanced') || text.includes('thinking') || aria.includes('model') || aria.includes('模型') || aria.includes('select') || aria.includes('switch'))
+      ) {
+        return btn;
+      }
+    }
+
+    const candidateSelectors = [
+      'button[data-test-id*="model"]',
+      'button[aria-label*="model" i]',
+      'button[aria-label*="模型"]',
+      '.model-selector-dropdown',
+      'button[aria-haspopup="menu"]',
+    ];
+    for (const sel of candidateSelectors) {
+      const el = document.querySelector(sel);
+      if (el && el.offsetParent !== null) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 智能模型检测与自动切换：
+   * 在新建会话或处于干净的 /app 页面时，自动检测当前模型是否为高阶模型（如 Pro / Advanced / Thinking）
+   * 若非高阶模型（如默认为 Flash / Fast），自动点击菜单完成切换，彻底解决默认模型偏离问题
+   */
+  async function ensureTargetModel(targetModelKeywords = ['Pro', 'Advanced', 'Thinking', 'Argon']) {
+    try {
+      const triggerBtn = findModelDropdownTrigger();
+      if (!triggerBtn) return false;
+
+      const currentText = (triggerBtn.innerText || '').trim();
+      const currentAria = (triggerBtn.getAttribute('aria-label') || '').trim();
+      const combinedText = `${currentText} ${currentAria}`.toLowerCase();
+
+      // 如果当前按钮已经处于高阶模型（包含任意目标关键词），直接放行
+      const isAlreadyTarget = targetModelKeywords.some((kw) => combinedText.includes(kw.toLowerCase()));
+      if (isAlreadyTarget) {
+        return true;
+      }
+
+      // 当前处于 Flash / Fast 或未知普通模型，展开下拉菜单
+      triggerBtn.click();
+      await sleep(350);
+
+      const menuSelectors = [
+        '[role="menuitem"]',
+        '[role="option"]',
+        'mat-option',
+        '.mat-mdc-menu-item',
+        'button.model-item',
+        'div[data-model-name]',
+        'button[data-test-id*="model"]',
+      ];
+
+      let targetOption = null;
+      for (let i = 0; i < 12; i++) {
+        for (const sel of menuSelectors) {
+          const items = Array.from(document.querySelectorAll(sel));
+          for (const item of items) {
+            const itemText = (item.innerText || '').toLowerCase();
+            const itemAria = (item.getAttribute('aria-label') || '').toLowerCase();
+            const fullItem = `${itemText} ${itemAria}`;
+            for (const kw of targetModelKeywords) {
+              if (fullItem.includes(kw.toLowerCase())) {
+                targetOption = item;
+                break;
+              }
+            }
+            if (targetOption) break;
+          }
+          if (targetOption) break;
+        }
+        if (targetOption) break;
+        await sleep(150);
+      }
+
+      if (targetOption) {
+        targetOption.click();
+        await sleep(400);
+        reportStatus('模型自动锁定', '已将模型自动切换至高阶架构师模式 (Pro/Advanced)');
+        return true;
+      } else {
+        // 未匹配到则重新点击以收起菜单
+        triggerBtn.click();
+      }
+    } catch (_) {}
+    return false;
   }
 
   /**
@@ -477,7 +618,20 @@
     }
   }
 
-  async function waitForGenerationComplete(initialCount, initialLastText, projectName, timeoutMs = 280000) {
+  async function waitForNewUserQuery(initialCount, timeoutMs = 6000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const queries = getUserQueryElements();
+      if (queries.length > initialCount) {
+        return queries[queries.length - 1];
+      }
+      await sleep(200);
+    }
+    const current = getUserQueryElements();
+    return current.length > 0 ? current[current.length - 1] : null;
+  }
+
+  async function waitForGenerationComplete(targetUserQueryEl, projectName, timeoutMs = 280000) {
     const startTime = Date.now();
     let generationStarted = false;
     let lastMutationTime = Date.now();
@@ -498,17 +652,31 @@
         await sleep(500);
 
         const responses = getModelResponseElements();
-        const currentCount = responses.length;
-        const latestNode = currentCount > 0 ? responses[currentCount - 1] : null;
-        const currentText = latestNode ? (latestNode.innerText || '').trim() : '';
+
+        // 核心安全隔离：寻找严格位于本轮 targetUserQueryEl 之后的 model-response，彻底防止读取历史上一轮旧消息
+        let targetResponseNode = null;
+        if (targetUserQueryEl) {
+          const following = responses.filter((res) => {
+            const pos = targetUserQueryEl.compareDocumentPosition(res);
+            return Boolean(pos & Node.DOCUMENT_POSITION_FOLLOWING);
+          });
+          if (following.length > 0) {
+            targetResponseNode = following[following.length - 1];
+          }
+        } else if (responses.length > 0) {
+          targetResponseNode = responses[responses.length - 1];
+        }
+
+        if (!targetResponseNode) {
+          // 本轮模型的响应容器尚未渲染挂载，继续等待
+          continue;
+        }
+
+        const currentText = (targetResponseNode.innerText || '').trim();
         const stopVisible = isStopButtonVisible();
 
         if (!generationStarted) {
-          if (
-            currentCount > initialCount ||
-            stopVisible ||
-            (currentText && currentText !== initialLastText)
-          ) {
+          if (stopVisible || currentText.length > 0) {
             generationStarted = true;
             lastMutationTime = Date.now();
             reportStatus(`Argon 正在回复 [${projectName}]`, '已检测到流式输出');
@@ -527,10 +695,15 @@
         }
 
         const quietDuration = Date.now() - lastMutationTime;
-        if (!stopVisible && currentText.length > 0 && quietDuration >= 2600) {
+        const isSubstantial = currentText.length > 30;
+        const isNotJustThinking =
+          !/^thinking(\.\.\.)?$/i.test(currentText) &&
+          !/^思考中(\.\.\.)?$/i.test(currentText);
+
+        if (!stopVisible && isSubstantial && isNotJustThinking && quietDuration >= 3500) {
           await sleep(600);
           if (!isStopButtonVisible()) {
-            return latestNode;
+            return targetResponseNode;
           }
         }
       }
@@ -601,9 +774,17 @@
       'mat-icon',
       'script',
       'style',
+      '.thought-container',
+      'expandable-thought',
+      '.thinking-container',
+      'thought-box',
+      'details.thought',
+      '.thought-wrapper',
     ];
     for (const sel of noiseSelectors) {
-      clone.querySelectorAll(sel).forEach((el) => el.remove());
+      try {
+        clone.querySelectorAll(sel).forEach((el) => el.remove());
+      } catch (_) {}
     }
 
     function walk(node) {
@@ -705,13 +886,23 @@
       .trim();
   }
 
-  async function extractCleanMarkdown(responseNode) {
+  async function extractCleanMarkdown(responseNode, taskPrompt = '') {
+    // 方案 1 (最优先且最稳定)：DOM 级结构化 Markdown 序列化提取
+    const domMarkdown = convertDomNodeToMarkdown(responseNode);
+    if (domMarkdown && domMarkdown.trim().length > 100) {
+      return {
+        markdown: domMarkdown.trim(),
+        source: 'dom-markdown-serializer',
+      };
+    }
+
+    // 方案 2：尝试页面自带的复制按钮拦截
     const copyBtn = findCopyButtonForResponse(responseNode);
     if (copyBtn) {
       const beforeClickTime = Date.now();
       lastCapturedClipboardText = '';
       copyBtn.click();
-      await sleep(350);
+      await sleep(400);
 
       if (lastCapturedClipboardText && lastCapturedClipboardTime >= beforeClickTime) {
         return {
@@ -721,20 +912,22 @@
       }
 
       try {
-        const clipText = await navigator.clipboard.readText();
-        if (clipText && clipText.trim().length > 0) {
+        const clipText = (await navigator.clipboard.readText()) || '';
+        const trimmedClip = clipText.trim();
+        // 关键校验：排除与用户 Prompt 相同或过短的内容
+        const isNotPrompt = !taskPrompt || !taskPrompt.includes(trimmedClip.slice(0, 50));
+        if (trimmedClip.length > 50 && isNotPrompt) {
           return {
-            markdown: clipText.trim(),
+            markdown: trimmedClip,
             source: 'navigator-clipboard',
           };
         }
       } catch (_) {}
     }
 
-    const domMarkdown = convertDomNodeToMarkdown(responseNode);
-    if (domMarkdown && domMarkdown.length > 0) {
+    if (domMarkdown && domMarkdown.trim().length > 0) {
       return {
-        markdown: domMarkdown,
+        markdown: domMarkdown.trim(),
         source: 'dom-markdown-serializer',
       };
     }
@@ -745,8 +938,14 @@
     };
   }
 
+  let currentActiveTaskId = null;
+
   async function handleAskArgonRequest(task) {
     if (isProcessingTask) {
+      if (task.requestId && task.requestId === currentActiveTaskId) {
+        // 同一任务重复投递，忽略跳过
+        return;
+      }
       sendMessageToBackground({
         type: 'ERROR',
         requestId: task.requestId,
@@ -756,36 +955,44 @@
     }
 
     isProcessingTask = true;
+    currentActiveTaskId = task.requestId;
     const projectName = task.projectName || 'default';
 
     try {
       await waitForInputReady(20000);
+      await waitForHistorySettled(2500);
+
+      const activeCid = getCurrentChatIdFromUrl();
+      const isNewChat = !activeCid || Boolean(task.forceNewChat);
 
       if (task.forceNewChat) {
         await ensureCleanNewChatIfRequired(true);
       }
 
-      const activeCid = getCurrentChatIdFromUrl();
+      // 如果是全新会话，自动确保切换至 Pro / Advanced 架构师模型
+      if (isNewChat) {
+        await ensureTargetModel(['Pro', 'Advanced', 'Thinking', 'Argon']);
+      }
+
       const badgeLabel = `${projectName} · ${activeCid ? '#' + activeCid.slice(0, 6) : 'NEW'}`;
 
       reportStatus(`正在向 [${projectName}] 专属会话提问...`, `Req: ${task.requestId.slice(0, 8)}`, badgeLabel);
 
-      const existingResponses = getModelResponseElements();
-      const initialCount = existingResponses.length;
-      const initialLastText =
-        initialCount > 0 ? (existingResponses[initialCount - 1].innerText || '').trim() : '';
+      const queryCountBefore = getUserQueryElements().length;
 
       await injectPromptAndSend(task.prompt);
       reportStatus(`已发送 [${projectName}] 提问`, '等待 Gemini 4 Argon 响应...', badgeLabel);
 
+      // 跟踪本轮提问所生成的最新 user-query 节点
+      const latestUserQueryNode = await waitForNewUserQuery(queryCountBefore, 6000);
+
       const latestResponseNode = await waitForGenerationComplete(
-        initialCount,
-        initialLastText,
+        latestUserQueryNode,
         projectName
       );
       reportStatus('生成完毕', '正在提取纯净 Markdown 与会话 ID...', badgeLabel);
 
-      const { markdown, source } = await extractCleanMarkdown(latestResponseNode);
+      const { markdown, source } = await extractCleanMarkdown(latestResponseNode, task.prompt);
       if (!markdown) {
         throw new Error('提取到的回复内容为空。');
       }
@@ -825,9 +1032,32 @@
       });
     } finally {
       isProcessingTask = false;
+      currentActiveTaskId = null;
     }
   }
 
+  // 监听单页路由跳转与新建会话：自动检测并切换为高阶架构师模型（守护普通用户手动新建对话）
+  function initAutoModelGuard() {
+    let lastUrl = window.location.href;
+    const checkAndEnforce = async () => {
+      const cid = getCurrentChatIdFromUrl();
+      if (!cid) {
+        await sleep(1200);
+        await ensureTargetModel(['Pro', 'Advanced', 'Thinking', 'Argon']);
+      }
+    };
+
+    setTimeout(checkAndEnforce, 2000);
+
+    setInterval(() => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        checkAndEnforce();
+      }
+    }, 1500);
+  }
+
+  initAutoModelGuard();
   createFloatingHud();
   connectToBackground();
 })();
