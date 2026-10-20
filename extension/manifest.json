@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.1 (Auto Model Guard & 1:1 Router)",
-  "version": "2.1.0",
-  "description": "Bridges local CLI / Google Antigravity with Web Gemini 4 Argon featuring Auto Model Guard and 1:1 Project-to-Chat auto-routing",
+  "name": "Argon Bridge v2.2 (Model & High-Thinking Lock)",
+  "version": "2.2.0",
+  "description": "Bridges local CLI / Google Antigravity with Web Gemini 4 Argon featuring Model & High-Thinking lock and 1:1 Project-to-Chat routing",
   "permissions": [
     "tabs",
     "scripting",

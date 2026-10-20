@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const DEFAULT_PORT = 17420;
-const DEFAULT_TIMEOUT_MS = 300000; // 5 minutes
+const DEFAULT_TIMEOUT_MS = 420000; // 7 minutes (supports deep reasoning and TTFT delay)
 const LOCAL_CONFIG_FILENAME = '.argon.json';
 const GLOBAL_REGISTRY_DIR = path.join(os.homedir(), '.argon-bridge');
 const GLOBAL_REGISTRY_FILE = path.join(GLOBAL_REGISTRY_DIR, 'sessions.json');
@@ -194,12 +194,14 @@ function printHelp() {
   --project, -P   指定项目名称（默认自动读取当前目录 .argon.json 或 package.json）
   --cwd, -C       指定目标项目根目录路径（默认当前工作目录 process.cwd()）
   --new-chat, -N  强制为当前项目创建新的 Gemini 会话并更新绑定
+  --model, -m     指定目标模型名称（默认 Argon，自动锁定高阶架构师模型）
+  --thinking      指定推理程度/思考深度（high | medium | low，默认 high）
   --chat-id       临时或显式指定要路由到的 Gemini Chat ID / URL
   --bind          将当前项目手动绑定到指定的 Gemini Chat URL 或 Chat ID
   --list, -l      列出全局所有已绑定的项目与专属 Gemini 会话映射
   --file, -f      从指定文件读取提问内容
   --out, -o       将 Argon 的回复写入指定文件（如 PLAN.md）
-  --timeout, -t   超时时间（毫秒，默认 300000）
+  --timeout, -t   超时时间（毫秒，默认 420000 即 7 分钟）
   --port, -p      本地 WebSocket 监听端口（默认 17420）
   --help, -h      显示本帮助信息
 `);
@@ -216,6 +218,8 @@ function parseArgs(argv) {
     chatId: null,
     newChat: false,
     reload: false,
+    model: 'Argon',
+    thinkingLevel: 'high',
     bindTarget: null,
     listOnly: false,
     port: DEFAULT_PORT,
@@ -234,6 +238,10 @@ function parseArgs(argv) {
       config.project = args[++i];
     } else if (arg === '--cwd' || arg === '-C') {
       config.cwd = args[++i];
+    } else if (arg === '--model' || arg === '-m') {
+      config.model = args[++i];
+    } else if (arg === '--thinking' || arg === '--effort') {
+      config.thinkingLevel = args[++i];
     } else if (arg === '--chat-id') {
       config.chatId = args[++i];
     } else if (arg === '--new-chat' || arg === '-N' || arg === '--reset') {
@@ -384,6 +392,8 @@ function main() {
           chatUrl: projectCtx.chatUrl,
           forceNewChat: projectCtx.isNewChat,
           reload: Boolean(config.reload),
+          model: config.model || 'Argon',
+          thinkingLevel: config.thinkingLevel || 'high',
           prompt: effectivePrompt,
           timestamp: Date.now(),
         })

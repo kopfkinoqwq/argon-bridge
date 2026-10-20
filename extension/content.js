@@ -433,9 +433,33 @@
     }
   }
 
+  // =========================================================================
+  // 4. 智能模型与思考深度双重锁定引擎 (Model = Argon & Thinking Effort = High)
+  // =========================================================================
+  const DEFAULT_TARGET_MODEL_KEYWORDS = ['argon', '4 argon', 'pro', 'advanced', 'deep think'];
+
+  const THINKING_LEVEL_SYNONYMS = {
+    high: ['high', '高', '深度思考', '深度推理', '深度', '最高', '最大', 'deep', 'maximum', 'extra thorough'],
+    medium: ['medium', 'med', '中', '中等', '标准', '均衡', 'balanced'],
+    low: ['low', 'minimal', '低', '轻量', '快速', '浅度', 'fast', 'quick'],
+  };
+
+  function isVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
   function simulateRealClick(el) {
     if (!el) return;
-    const opts = { bubbles: true, cancelable: true, view: window };
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new PointerEvent('pointerup', opts));
@@ -443,11 +467,61 @@
     el.click();
   }
 
-  function findModelDropdownTrigger() {
-    // 1. 精确选择器：涵盖底部输入栏与顶部 bard-mode-switcher
+  function getElementDescriptor(el) {
+    if (!el) return '';
+    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const aria = el.getAttribute('aria-label') || '';
+    const tooltip = el.getAttribute('mattooltip') || el.getAttribute('title') || '';
+    const testId = el.getAttribute('data-test-id') || el.getAttribute('data-value') || '';
+    return `${text} ${aria} ${tooltip} ${testId}`.replace(/\s+/g, ' ').trim();
+  }
+
+  function isElementSelected(el) {
+    if (!el) return false;
+    if (
+      el.getAttribute('aria-checked') === 'true' ||
+      el.getAttribute('aria-selected') === 'true' ||
+      el.getAttribute('aria-pressed') === 'true' ||
+      el.classList.contains('mat-button-toggle-checked') ||
+      el.classList.contains('mat-mdc-chip-selected') ||
+      el.classList.contains('selected') ||
+      el.classList.contains('active')
+    ) {
+      return true;
+    }
+    const parentToggle = el.closest('mat-button-toggle');
+    if (parentToggle && parentToggle.classList.contains('mat-button-toggle-checked')) {
+      return true;
+    }
+    const icons = Array.from(el.querySelectorAll('mat-icon, .material-symbols-outlined, svg'));
+    for (const icon of icons) {
+      const iconText = (icon.textContent || '').trim().toLowerCase();
+      if (iconText === 'check' || iconText === 'done' || iconText === 'radio_button_checked') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function closeActiveOverlays() {
+    const backdrops = Array.from(document.querySelectorAll('.cdk-overlay-backdrop.cdk-overlay-backdrop-showing'));
+    if (backdrops.length > 0) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      await sleep(150);
+      for (const bd of backdrops) {
+        if (isVisible(bd)) {
+          bd.click();
+        }
+      }
+      await sleep(150);
+    }
+  }
+
+  function findModelSwitcherButton() {
     const explicitSelectors = [
       'bard-mode-switcher button',
       '[data-test-id="bard-mode-menu-button"]',
+      '[data-test-id*="model-selector"]',
       'input-area-v2 button[aria-haspopup="menu"]',
       'rich-textarea ~ * button[aria-haspopup="menu"]',
       'button[aria-label*="model" i]',
@@ -460,21 +534,18 @@
     for (const sel of explicitSelectors) {
       const btns = Array.from(document.querySelectorAll(sel));
       for (const btn of btns) {
-        if (btn && btn.offsetParent !== null) {
-          const txt = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
-          if (/flash|argon|pro|advanced|deep think|gemini|\d\.\d/i.test(txt)) {
-            return btn;
-          }
+        if (!isVisible(btn)) continue;
+        const desc = getElementDescriptor(btn);
+        if (/flash|argon|pro|advanced|gemini|\d\.\d/i.test(desc)) {
+          return btn;
         }
       }
     }
 
-    // 2. 启发式探测：扫描可见按钮，定位模型代号按钮
     const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
     for (const btn of allButtons) {
-      if (!btn || btn.offsetParent === null) continue;
+      if (!isVisible(btn)) continue;
       if (btn.closest('mat-sidenav') || btn.closest('pre') || btn.closest('model-response')) continue;
-
       const text = (btn.innerText || '').replace(/\s+/g, ' ').trim();
       if (
         text.length > 0 &&
@@ -484,90 +555,409 @@
         return btn;
       }
     }
+    return null;
+  }
+
+  function findStandaloneThinkingButton(modelBtn = null) {
+    const inputArea =
+      document.querySelector('input-area-v2') ||
+      document.querySelector('.input-area-container') ||
+      document.querySelector('.input-area') ||
+      (document.querySelector('rich-textarea')
+        ? document.querySelector('rich-textarea').closest('form, .input-area, main')
+        : null) ||
+      document.body;
+
+    const inlineToggles = Array.from(
+      inputArea.querySelectorAll('mat-button-toggle button, [role="radio"], [role="tab"]')
+    ).filter(isVisible);
+    if (inlineToggles.length >= 2) {
+      const hasHigh = inlineToggles.some((el) => matchesThinkingTier(el, 'high'));
+      const hasLow = inlineToggles.some((el) => matchesThinkingTier(el, 'low'));
+      if (hasHigh && hasLow) {
+        return { type: 'inline-group', elements: inlineToggles };
+      }
+    }
+
+    const candidates = Array.from(
+      inputArea.querySelectorAll('button, [role="button"], mat-chip-option, [role="combobox"]')
+    ).filter((el) => {
+      if (!isVisible(el)) return false;
+      if (modelBtn && (el === modelBtn || modelBtn.contains(el) || el.contains(modelBtn))) return false;
+      if (el.closest('mat-sidenav') || el.closest('model-response') || el.closest('pre')) return false;
+      return true;
+    });
+
+    for (const btn of candidates) {
+      const desc = getElementDescriptor(btn).toLowerCase();
+      const shortText = (btn.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      if (
+        /\b(thinking|reasoning|effort|budget|思考|推理|深度)\b/i.test(desc) ||
+        /^(low|medium|high|minimal|低|中|高|深度思考|轻量推理)$/i.test(shortText) ||
+        /\b(thinking|思考|推理)\s*[:：-]?\s*(low|medium|high|低|中|高)\b/i.test(desc)
+      ) {
+        return { type: 'dropdown-button', element: btn };
+      }
+    }
 
     return null;
   }
 
-  /**
-   * 智能模型检测与自动切换：
-   * 在新建会话或处于干净的 /app 页面时，自动检测当前模型是否为高阶模型（如 Argon / Pro / Advanced / Thinking）
-   * 若非高阶模型（如默认为 Flash / Fast），自动点击菜单完成切换，彻底解决默认模型偏离问题
-   */
-  async function ensureTargetModel(targetModelKeywords = ['Argon', 'Pro', 'Advanced', 'Thinking']) {
-    try {
-      const triggerBtn = findModelDropdownTrigger();
-      if (!triggerBtn) return false;
+  function matchesThinkingTier(el, tierKey = 'high') {
+    if (!el) return false;
+    const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const ariaText = (
+      (el.getAttribute('aria-label') || '') +
+      ' ' +
+      (el.getAttribute('data-test-id') || '') +
+      ' ' +
+      (el.getAttribute('data-value') || '')
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
 
-      const currentText = (triggerBtn.innerText || '').trim();
-      const currentAria = (triggerBtn.getAttribute('aria-label') || '').trim();
-      const combinedText = `${currentText} ${currentAria}`.toLowerCase();
+    if (/\b(flash-lite|3\.8\s*flash|3\.5\s*flash|gemini\s*4\s*argon|gemini\s*3)\b/i.test(rawText) && rawText.length > 25) {
+      return false;
+    }
 
-      // 如果当前按钮已经处于高阶模型（包含任意目标关键词），直接放行
-      const isAlreadyTarget = targetModelKeywords.some((kw) => combinedText.includes(kw.toLowerCase()));
-      if (isAlreadyTarget) {
+    if (tierKey === 'high') {
+      if (/^(low|medium|minimal|低|中)\b/i.test(rawText)) return false;
+      if (
+        /\b(high|maximum|extra\s*thorough)\b/i.test(rawText) ||
+        /\b(high)\b/i.test(ariaText) ||
+        /^(高|深度|深度思考|深度推理|最大|最高)(\s|$|（|\()/i.test(rawText) ||
+        /(思考|推理|thinking|effort|level).*?(high|高|深度|最大)/i.test(`${rawText}${ariaText}`)
+      ) {
         return true;
       }
-
-      // 当前处于 Flash / Fast 或未知普通模型，展开下拉菜单
-      simulateRealClick(triggerBtn);
-      await sleep(350);
-
-      const overlayRoot = document.querySelector('.cdk-overlay-container') || document.body;
-      const menuSelectors = [
-        'button[role="menuitem"]',
-        'button[role="menuitemradio"]',
-        '[role="option"]',
-        'mat-option',
-        '.mat-mdc-menu-item',
-        '.bard-mode-list-button',
-        '.cdk-overlay-pane button',
-      ];
-
-      let targetOption = null;
-      for (let i = 0; i < 12; i++) {
-        const items = [];
-        for (const sel of menuSelectors) {
-          overlayRoot.querySelectorAll(sel).forEach((el) => {
-            if (el && el.offsetParent !== null && !items.includes(el)) {
-              items.push(el);
-            }
-          });
-        }
-
-        for (const kw of targetModelKeywords) {
-          const lowerKw = kw.toLowerCase();
-          for (const item of items) {
-            const itemText = (item.innerText || item.textContent || '').replace(/\s+/g, ' ').toLowerCase();
-            if (itemText.includes(lowerKw)) {
-              const isDisabled =
-                item.disabled ||
-                item.getAttribute('aria-disabled') === 'true' ||
-                item.classList.contains('mat-mdc-menu-item-disabled');
-              if (!isDisabled) {
-                targetOption = item;
-                break;
-              }
-            }
-          }
-          if (targetOption) break;
-        }
-
-        if (targetOption) break;
-        await sleep(150);
-      }
-
-      if (targetOption) {
-        simulateRealClick(targetOption);
-        await sleep(400);
-        reportStatus('模型自动锁定', '已将模型自动切换至高阶架构师模式 (Argon/Pro)');
+    } else if (tierKey === 'low') {
+      if (
+        /\b(low|minimal)\b/i.test(rawText) ||
+        /\b(low|minimal)\b/i.test(ariaText) ||
+        /^(低|轻量|快速|浅度)(\s|$|（|\()/i.test(rawText)
+      ) {
         return true;
-      } else {
-        // 未匹配到则按 Escape 键关闭浮层，避免遮挡
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-        await sleep(150);
       }
-    } catch (_) {}
+    } else if (tierKey === 'medium') {
+      if (
+        /\b(medium|balanced)\b/i.test(rawText) ||
+        /\b(medium)\b/i.test(ariaText) ||
+        /^(中|中等|标准|均衡)(\s|$|（|\()/i.test(rawText)
+      ) {
+        return true;
+      }
+    }
+
     return false;
+  }
+
+  function isDescriptorAlreadyAtTier(descText, targetTier = 'high') {
+    if (!descText) return false;
+    const norm = descText.replace(/\s+/g, ' ').trim().toLowerCase();
+    const synonyms = THINKING_LEVEL_SYNONYMS[targetTier] || THINKING_LEVEL_SYNONYMS.high;
+
+    if (targetTier === 'high' && /(\b(low|medium|minimal)\b|[:：\s](低|中|轻量|标准)(?:$|\s|\)))/i.test(norm)) {
+      return false;
+    }
+
+    for (const word of synonyms) {
+      const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const reg = /^[a-z]+$/i.test(word) ? new RegExp(`\\b${escaped}\\b`, 'i') : new RegExp(escaped, 'i');
+      if (reg.test(norm)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function findTargetModelOptionInOverlay(targetKeywords) {
+    const overlayRoot = document.querySelector('.cdk-overlay-container');
+    if (!overlayRoot) return null;
+
+    const candidateSelectors = [
+      'button[role="menuitem"]',
+      'button[role="menuitemradio"]',
+      '[role="option"]',
+      'mat-option',
+      '.mat-mdc-menu-item',
+      '.bard-mode-list-button',
+      '.cdk-overlay-pane button',
+    ];
+
+    const items = [];
+    for (const sel of candidateSelectors) {
+      overlayRoot.querySelectorAll(sel).forEach((el) => {
+        if (isVisible(el) && !items.includes(el)) {
+          if (!matchesThinkingTier(el, 'high') && !matchesThinkingTier(el, 'low') && !matchesThinkingTier(el, 'medium')) {
+            items.push(el);
+          }
+        }
+      });
+    }
+
+    for (const keyword of targetKeywords) {
+      const kw = keyword.toLowerCase();
+      for (const item of items) {
+        const itemText = getElementDescriptor(item).toLowerCase();
+        if (itemText.includes(kw)) {
+          const isDisabled =
+            item.disabled ||
+            item.getAttribute('aria-disabled') === 'true' ||
+            item.classList.contains('mat-mdc-menu-item-disabled');
+          if (!isDisabled) {
+            return {
+              element: item,
+              matchedKeyword: keyword,
+              fullText: (item.innerText || '').replace(/\s+/g, ' ').trim(),
+              alreadySelected: isElementSelected(item),
+            };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function findThinkingTierOptionInOverlay(targetTier = 'high') {
+    const overlayRoot = document.querySelector('.cdk-overlay-container');
+    if (!overlayRoot) return null;
+
+    const candidateSelectors = [
+      'mat-button-toggle button',
+      'mat-button-toggle',
+      'button[role="radio"]',
+      'button[role="menuitemradio"]',
+      'button[role="menuitem"]',
+      '[role="option"]',
+      'mat-option',
+      '.mat-mdc-menu-item',
+      '.cdk-overlay-pane button',
+    ];
+
+    const candidates = [];
+    for (const sel of candidateSelectors) {
+      overlayRoot.querySelectorAll(sel).forEach((el) => {
+        if (isVisible(el) && !candidates.includes(el)) {
+          candidates.push(el);
+        }
+      });
+    }
+
+    for (const item of candidates) {
+      if (matchesThinkingTier(item, targetTier)) {
+        const clickable =
+          item.tagName.toLowerCase() === 'mat-button-toggle'
+            ? item.querySelector('button') || item
+            : item;
+        const isDisabled =
+          clickable.disabled ||
+          clickable.getAttribute('aria-disabled') === 'true' ||
+          item.getAttribute('aria-disabled') === 'true';
+        if (!isDisabled) {
+          return {
+            element: clickable,
+            alreadySelected: isElementSelected(item) || isElementSelected(clickable),
+            label: (item.innerText || '').replace(/\s+/g, ' ').trim() || targetTier.toUpperCase(),
+          };
+        }
+      }
+    }
+
+    for (const item of candidates) {
+      const desc = getElementDescriptor(item).toLowerCase();
+      if (
+        /\b(thinking\s*level|thinking\s*effort|reasoning|思考深度|推理程度|思考模式)\b/i.test(desc) &&
+        !matchesThinkingTier(item, 'high') &&
+        !matchesThinkingTier(item, 'low')
+      ) {
+        return {
+          element: item,
+          isSubmenuTrigger: true,
+          label: (item.innerText || '').replace(/\s+/g, ' ').trim(),
+        };
+      }
+    }
+
+    return null;
+  }
+
+  async function ensureTargetModelAndThinking(preferredModel = 'Argon', preferredThinkingTier = 'high') {
+    const targetModelKeywords = preferredModel
+      ? [preferredModel.toLowerCase(), ...DEFAULT_TARGET_MODEL_KEYWORDS]
+      : DEFAULT_TARGET_MODEL_KEYWORDS;
+    const targetTier = (preferredThinkingTier || 'high').toLowerCase();
+
+    let finalModelLabel = preferredModel;
+    let thinkingLocked = false;
+
+    // 阶段 A：检查并锁定目标模型 (Argon)
+    const switcherBtn = findModelSwitcherButton();
+    if (switcherBtn) {
+      const currentBtnDesc = getElementDescriptor(switcherBtn);
+      const currentBtnText = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim();
+      const isModelAlreadyTarget = currentBtnDesc.toLowerCase().includes(targetModelKeywords[0]);
+
+      if (!isModelAlreadyTarget) {
+        reportStatus(
+          `检测到当前模型为 [${currentBtnText || 'Flash'}]`,
+          `正在切换模型至 ${preferredModel} 并准备锁定 ${targetTier.toUpperCase()} 推理深度...`
+        );
+
+        simulateRealClick(switcherBtn);
+
+        let modelOpt = null;
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 2500) {
+          await sleep(100);
+          modelOpt = findTargetModelOptionInOverlay(targetModelKeywords);
+          if (modelOpt) break;
+        }
+
+        const inlineThinkingPre = findThinkingTierOptionInOverlay(targetTier);
+        if (inlineThinkingPre && !inlineThinkingPre.isSubmenuTrigger) {
+          if (!inlineThinkingPre.alreadySelected) {
+            simulateRealClick(inlineThinkingPre.element);
+            await sleep(220);
+          }
+          thinkingLocked = true;
+        }
+
+        if (modelOpt) {
+          if (!modelOpt.alreadySelected) {
+            simulateRealClick(modelOpt.element);
+            await sleep(450);
+          }
+          finalModelLabel = modelOpt.fullText || preferredModel;
+        } else {
+          await closeActiveOverlays();
+        }
+      } else {
+        finalModelLabel = currentBtnText || preferredModel;
+      }
+    }
+
+    // 阶段 B：探测底部输入栏独立 Thinking Effort 胶囊按钮或内联组
+    const refreshedModelBtn = findModelSwitcherButton();
+    if (refreshedModelBtn) {
+      const txt = (refreshedModelBtn.innerText || '').replace(/\s+/g, ' ').trim();
+      if (txt) finalModelLabel = txt;
+    }
+
+    const standaloneCtrl = findStandaloneThinkingButton(refreshedModelBtn);
+
+    if (standaloneCtrl) {
+      if (standaloneCtrl.type === 'inline-group') {
+        const highBtn = standaloneCtrl.elements.find((el) => matchesThinkingTier(el, targetTier));
+        if (highBtn) {
+          if (!isElementSelected(highBtn)) {
+            reportStatus(
+              `正在调整推理程度 -> ${targetTier.toUpperCase()}`,
+              '点击输入栏内联 High 思考档位...'
+            );
+            simulateRealClick(highBtn);
+            await sleep(300);
+          }
+          thinkingLocked = true;
+        }
+      } else if (standaloneCtrl.type === 'dropdown-button') {
+        const chipEl = standaloneCtrl.element;
+        const chipDesc = getElementDescriptor(chipEl);
+
+        if (isDescriptorAlreadyAtTier(chipDesc, targetTier)) {
+          thinkingLocked = true;
+        } else {
+          reportStatus(
+            `检测到思考深度为 [${(chipEl.innerText || 'Low').trim()}]`,
+            `正在切换推理程度至 ${targetTier.toUpperCase()} (深度思考)...`
+          );
+
+          simulateRealClick(chipEl);
+
+          let tierOpt = null;
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < 2200) {
+            await sleep(100);
+            tierOpt = findThinkingTierOptionInOverlay(targetTier);
+            if (tierOpt) break;
+          }
+
+          if (tierOpt && tierOpt.isSubmenuTrigger) {
+            simulateRealClick(tierOpt.element);
+            await sleep(300);
+            tierOpt = findThinkingTierOptionInOverlay(targetTier);
+          }
+
+          if (tierOpt && !tierOpt.isSubmenuTrigger) {
+            if (!tierOpt.alreadySelected) {
+              simulateRealClick(tierOpt.element);
+              await sleep(350);
+            }
+            thinkingLocked = true;
+          }
+          await closeActiveOverlays();
+        }
+      }
+    }
+
+    // 阶段 C：若未锁定，复查模型菜单内的内嵌 Thinking 切换器
+    if (!thinkingLocked && refreshedModelBtn) {
+      const modelBtnDesc = getElementDescriptor(refreshedModelBtn);
+      if (isDescriptorAlreadyAtTier(modelBtnDesc, targetTier)) {
+        thinkingLocked = true;
+      } else {
+        simulateRealClick(refreshedModelBtn);
+
+        let tierOpt = null;
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 2200) {
+          await sleep(100);
+          tierOpt = findThinkingTierOptionInOverlay(targetTier);
+          if (tierOpt) break;
+        }
+
+        if (tierOpt && tierOpt.isSubmenuTrigger) {
+          simulateRealClick(tierOpt.element);
+          await sleep(300);
+          tierOpt = findThinkingTierOptionInOverlay(targetTier);
+        }
+
+        if (tierOpt && !tierOpt.isSubmenuTrigger) {
+          if (!tierOpt.alreadySelected) {
+            reportStatus(
+              `正在锁定推理程度 -> ${targetTier.toUpperCase()}`,
+              `在模型菜单内切换至 ${tierOpt.label}...`
+            );
+            simulateRealClick(tierOpt.element);
+            await sleep(350);
+          }
+          thinkingLocked = true;
+        }
+
+        await closeActiveOverlays();
+      }
+    }
+
+    await closeActiveOverlays();
+
+    const inputEl = findInputElement();
+    if (inputEl) {
+      inputEl.focus();
+    }
+
+    reportStatus(
+      `双锁就绪: ${finalModelLabel} · Thinking=${targetTier.toUpperCase()}`,
+      thinkingLocked
+        ? `已确认开启 ${targetTier.toUpperCase()} 深度思考模式`
+        : `模型已锁定 (${finalModelLabel})`
+    );
+
+    return {
+      model: finalModelLabel,
+      thinkingLevel: targetTier,
+      thinkingLocked,
+    };
   }
 
   /**
@@ -688,24 +1078,14 @@
 
         const responses = getModelResponseElements();
 
-        // 核心安全隔离：寻找严格位于本轮 targetUserQueryEl 之后的 model-response，彻底防止读取历史上一轮旧消息
-        let targetResponseNode = null;
-        if (targetUserQueryEl) {
-          const following = responses.filter((res) => {
-            const pos = targetUserQueryEl.compareDocumentPosition(res);
-            return Boolean(pos & Node.DOCUMENT_POSITION_FOLLOWING);
-          });
-          if (following.length > 0) {
-            targetResponseNode = following[following.length - 1];
-          }
-        } else if (responses.length > 0) {
-          targetResponseNode = responses[responses.length - 1];
-        }
-
-        if (!targetResponseNode) {
+        // 绝对安全隔离：只接受本次提问后新生成的 model-response，严禁匹配任何已有历史节点
+        const unhandledResponses = responses.filter((res) => !res.hasAttribute('data-argon-existing'));
+        if (unhandledResponses.length === 0) {
           // 本轮模型的响应容器尚未渲染挂载，继续等待
           continue;
         }
+
+        const targetResponseNode = unhandledResponses[unhandledResponses.length - 1];
 
         const currentText = (targetResponseNode.innerText || '').trim();
         const stopVisible = isStopButtonVisible();
@@ -992,39 +1372,56 @@
     isProcessingTask = true;
     currentActiveTaskId = task.requestId;
     const projectName = task.projectName || 'default';
+    const targetModel = task.model || 'Argon';
+    const targetThinking = task.thinkingLevel || 'high';
 
     try {
       await waitForInputReady(20000);
       await waitForHistorySettled(2500);
 
-      const activeCid = getCurrentChatIdFromUrl();
-      const isNewChat = !activeCid || Boolean(task.forceNewChat);
-
       if (task.forceNewChat) {
         await ensureCleanNewChatIfRequired(true);
+        await waitForInputReady(10000);
       }
 
-      // 如果是全新会话，自动确保切换至 Pro / Advanced 架构师模型
-      if (isNewChat) {
-        await ensureTargetModel(['Pro', 'Advanced', 'Thinking', 'Argon']);
-      }
+      // 执行“模型 (Argon) + 思考深度 (High)”双重预检与自动锁定
+      const lockResult = await ensureTargetModelAndThinking(targetModel, targetThinking);
 
-      const badgeLabel = `${projectName} · ${activeCid ? '#' + activeCid.slice(0, 6) : 'NEW'}`;
+      const activeCid = getCurrentChatIdFromUrl();
+      const badgeLabel = `${projectName} · ${targetThinking.toUpperCase()} · ${
+        activeCid ? '#' + activeCid.slice(0, 6) : 'NEW'
+      }`;
 
-      reportStatus(`正在向 [${projectName}] 专属会话提问...`, `Req: ${task.requestId.slice(0, 8)}`, badgeLabel);
+      reportStatus(
+        `正在向 [${projectName}] 专属会话提问 (${lockResult.model} / ${targetThinking.toUpperCase()})...`,
+        `Req: ${task.requestId.slice(0, 8)}`,
+        badgeLabel
+      );
+
+      // 1. 将页面上当前已有的所有模型响应标记为 existing，绝对避免读取旧消息
+      getModelResponseElements().forEach((el) => el.setAttribute('data-argon-existing', 'true'));
 
       const queryCountBefore = getUserQueryElements().length;
 
       await injectPromptAndSend(task.prompt);
-      reportStatus(`已发送 [${projectName}] 提问`, '等待 Gemini 4 Argon 响应...', badgeLabel);
+      reportStatus(
+        `已发送 [${projectName}] 提问`,
+        `等待 Gemini 4 Argon (${targetThinking.toUpperCase()}) 深度推理与回复...`,
+        badgeLabel
+      );
 
       // 跟踪本轮提问所生成的最新 user-query 节点
       const latestUserQueryNode = await waitForNewUserQuery(queryCountBefore, 6000);
 
+      // 开启 HIGH 思考深度后首字延迟增加，超时放宽至 360 秒
       const latestResponseNode = await waitForGenerationComplete(
         latestUserQueryNode,
-        projectName
+        projectName,
+        360000
       );
+      if (latestResponseNode) {
+        latestResponseNode.setAttribute('data-argon-existing', 'true');
+      }
       reportStatus('生成完毕', '正在提取纯净 Markdown 与会话 ID...', badgeLabel);
 
       const { markdown, source } = await extractCleanMarkdown(latestResponseNode, task.prompt);
@@ -1038,7 +1435,9 @@
         ? `https://gemini.google.com/app/${finalChatId}`
         : window.location.href;
 
-      const finalBadge = `${projectName} · ${finalChatId ? '#' + finalChatId.slice(0, 6) : 'BOUND'}`;
+      const finalBadge = `${projectName} · ${targetThinking.toUpperCase()} · ${
+        finalChatId ? '#' + finalChatId.slice(0, 6) : 'BOUND'
+      }`;
 
       sendMessageToBackground({
         type: 'RESPONSE',
@@ -1047,6 +1446,8 @@
         projectName,
         chatId: finalChatId,
         chatUrl: finalChatUrl,
+        model: lockResult.model,
+        thinkingLevel: lockResult.thinkingLevel,
         markdown,
         source,
         timestamp: Date.now(),
@@ -1055,7 +1456,7 @@
       updateHud(
         'CONNECTED',
         `Argon Bridge: [${projectName}] 已完成`,
-        `已回传 ${markdown.length} 字符 (${source})`,
+        `已回传 ${markdown.length} 字符 (${source} · ${targetThinking.toUpperCase()})`,
         finalBadge
       );
     } catch (err) {
@@ -1071,14 +1472,14 @@
     }
   }
 
-  // 监听单页路由跳转与新建会话：自动检测并切换为高阶架构师模型（守护普通用户手动新建对话）
+  // 监听单页路由跳转与新建会话：自动检测并切换为高阶架构师模型 + High 深度思考（守护普通用户手动新建对话）
   function initAutoModelGuard() {
     let lastUrl = window.location.href;
     const checkAndEnforce = async () => {
       const cid = getCurrentChatIdFromUrl();
       if (!cid) {
         await sleep(1200);
-        await ensureTargetModel(['Pro', 'Advanced', 'Thinking', 'Argon']);
+        await ensureTargetModelAndThinking('Argon', 'high');
       }
     };
 

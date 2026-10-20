@@ -1,7 +1,7 @@
 {
   "name": "argon-bridge",
-  "version": "2.1.0",
-  "description": "Zero-bloat WebSocket bridge with 1:1 Project-to-Chat session mapping and auto-routing for Web Gemini 4 Argon",
+  "version": "2.2.0",
+  "description": "Zero-bloat WebSocket bridge with Model & High-Thinking lock and 1:1 Project-to-Chat session mapping for Web Gemini 4 Argon",
   "main": "ask_argon.js",
   "bin": {
     "ask-argon": "./ask_argon.js"
