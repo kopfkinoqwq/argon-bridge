@@ -504,17 +504,42 @@
   }
 
   async function closeActiveOverlays() {
-    const backdrops = Array.from(document.querySelectorAll('.cdk-overlay-backdrop.cdk-overlay-backdrop-showing'));
-    if (backdrops.length > 0) {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-      await sleep(150);
-      for (const bd of backdrops) {
-        if (isVisible(bd)) {
-          bd.click();
-        }
-      }
-      await sleep(150);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await sleep(120);
+    const backdrops = Array.from(document.querySelectorAll('.cdk-overlay-backdrop'));
+    for (const bd of backdrops) {
+      try {
+        bd.remove();
+      } catch (_) {}
     }
+    const panes = Array.from(document.querySelectorAll('.cdk-overlay-pane'));
+    for (const p of panes) {
+      if (p.querySelector('button[role="menuitem"], mat-button-toggle, mat-option, .bard-mode-list-button')) {
+        try {
+          p.remove();
+        } catch (_) {}
+      }
+    }
+    await sleep(80);
+  }
+
+  function findSafetyBlockElement() {
+    const errorSelectors = [
+      '.error-message',
+      '.response-error',
+      '[data-test-id*="safety"]',
+      '.safety-block-container',
+      '.safety-block',
+      'mat-icon[fonticon="error"]',
+      'mat-icon[fonticon="warning"]',
+      '.response-warning',
+    ];
+    for (const sel of errorSelectors) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) return el;
+    }
+    return null;
   }
 
   function findModelSwitcherButton() {
@@ -991,10 +1016,12 @@
   }
 
   async function injectPromptAndSend(promptText) {
+    await closeActiveOverlays();
+
     const inputEl = await waitForInputReady(20000);
 
     inputEl.focus();
-    await sleep(120);
+    await sleep(150);
 
     if (inputEl.tagName.toLowerCase() === 'textarea') {
       inputEl.value = promptText;
@@ -1025,11 +1052,19 @@
       );
     }
 
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(350);
 
-    const sendBtn = findSendButton();
+    let sendBtn = findSendButton();
+    for (let retry = 0; retry < 5 && !sendBtn; retry++) {
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(150);
+      sendBtn = findSendButton();
+    }
+
     if (sendBtn) {
-      sendBtn.click();
+      simulateRealClick(sendBtn);
     } else {
       inputEl.dispatchEvent(
         new KeyboardEvent('keydown', {
@@ -1056,7 +1091,7 @@
     return current.length > 0 ? current[current.length - 1] : null;
   }
 
-  async function waitForGenerationComplete(targetUserQueryEl, projectName, timeoutMs = 280000) {
+  async function waitForGenerationComplete(targetUserQueryEl, projectName, timeoutMs = 360000) {
     const startTime = Date.now();
     let generationStarted = false;
     let lastMutationTime = Date.now();
@@ -1076,6 +1111,13 @@
       while (Date.now() - startTime < timeoutMs) {
         await sleep(500);
 
+        // 探测 Google 官方安全策略拦截卡片（如触发敏感词拒答）
+        const safetyBlock = findSafetyBlockElement();
+        if (safetyBlock) {
+          const blockText = (safetyBlock.innerText || '').replace(/\s+/g, ' ').trim();
+          throw new Error(`[SAFETY_BLOCKED] Google 官方安全策略拦截: ${blockText || '触发敏感内容防护'}`);
+        }
+
         const responses = getModelResponseElements();
 
         // 绝对安全隔离：只接受本次提问后新生成的 model-response，严禁匹配任何已有历史节点
@@ -1089,6 +1131,11 @@
 
         const currentText = (targetResponseNode.innerText || '').trim();
         const stopVisible = isStopButtonVisible();
+
+        // 检查回答内是否出现拒答固定句式
+        if (/^(I cannot help with that|I'm unable to assist|作为人工智能模型，我无法|很抱歉，我不能)/i.test(currentText)) {
+          throw new Error(`[SAFETY_REFUSAL] Argon 拒答: ${currentText.slice(0, 80)}`);
+        }
 
         if (!generationStarted) {
           if (stopVisible || currentText.length > 0) {
@@ -1122,7 +1169,7 @@
           }
         }
       }
-      throw new Error('等待 Gemini 4 Argon 生成回复超时。');
+      throw new Error('等待 Gemini 4 Argon 生成回复超时。请确认网页端未处于卡顿或遮罩状态。');
     } finally {
       observer.disconnect();
     }
