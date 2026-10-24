@@ -341,22 +341,66 @@
   }
 
   function findSendButton() {
-    const selectors = [
+    const candidateSelectors = [
       'button.send-button',
       'button[aria-label*="Send message"]',
       'button[aria-label*="Send"]',
       'button[aria-label*="发送"]',
+      'button[aria-label*="提交"]',
       'button[data-test-id="send-button"]',
+      'button[data-test-id*="send"]',
       '.send-button-container button',
+      'rich-textarea ~ * button',
+      '.input-area button',
     ];
-    for (const sel of selectors) {
-      const btns = Array.from(document.querySelectorAll(sel));
-      for (const btn of btns) {
-        if (btn && btn.offsetParent !== null && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+
+    for (const sel of candidateSelectors) {
+      try {
+        const btns = Array.from(document.querySelectorAll(sel));
+        for (const btn of btns) {
+          if (isVisible(btn)) {
+            const ariaDisabled = btn.getAttribute('aria-disabled') === 'true';
+            const disabled = btn.disabled;
+            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+            
+            // 排除清空、语音、附件等无关按钮
+            if (
+              ariaLabel.includes('mic') ||
+              ariaLabel.includes('语音') ||
+              ariaLabel.includes('upload') ||
+              ariaLabel.includes('上传') ||
+              ariaLabel.includes('file')
+            ) {
+              continue;
+            }
+
+            if (!disabled && !ariaDisabled) {
+              return btn;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 启发式搜索：查找包含向上箭头或 send 图标的按钮
+    const icons = Array.from(document.querySelectorAll('mat-icon, svg, .material-symbols-outlined'));
+    for (const icon of icons) {
+      const iconText = (icon.textContent || '').trim().toLowerCase();
+      const fontIcon = (icon.getAttribute('fonticon') || icon.getAttribute('data-mat-icon-name') || '').toLowerCase();
+      if (
+        iconText === 'send' ||
+        iconText === 'arrow_upward' ||
+        iconText === 'north' ||
+        fontIcon === 'send' ||
+        fontIcon === 'arrow_upward'
+      ) {
+        const btn = icon.closest('button, [role="button"]');
+        if (btn && isVisible(btn) && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
           return btn;
         }
       }
     }
+
     return null;
   }
 
@@ -1023,23 +1067,20 @@
     inputEl.focus();
     await sleep(150);
 
+    const queryCountBefore = getUserQueryElements().length;
+
+    // 清空输入框并注入完整段落
     if (inputEl.tagName.toLowerCase() === 'textarea') {
       inputEl.value = promptText;
       inputEl.dispatchEvent(new Event('input', { bubbles: true }));
       inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
-      document.execCommand('selectAll', false, null);
-      document.execCommand('delete', false, null);
-
-      const inserted = document.execCommand('insertText', false, promptText);
-      if (!inserted || !inputEl.innerText.trim()) {
-        inputEl.innerHTML = '';
-        const lines = promptText.split('\n');
-        for (const line of lines) {
-          const p = document.createElement('p');
-          p.textContent = line || '\u200B';
-          inputEl.appendChild(p);
-        }
+      inputEl.innerHTML = '';
+      const lines = promptText.split('\n');
+      for (const line of lines) {
+        const p = document.createElement('p');
+        p.textContent = line || '\u200B';
+        inputEl.appendChild(p);
       }
 
       inputEl.dispatchEvent(
@@ -1056,16 +1097,29 @@
     inputEl.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(350);
 
-    let sendBtn = findSendButton();
-    for (let retry = 0; retry < 5 && !sendBtn; retry++) {
-      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      await sleep(150);
+    // 等待发送按钮解除禁用并激活（至多 4 秒）
+    let sendBtn = null;
+    for (let waitRetry = 0; waitRetry < 15; waitRetry++) {
       sendBtn = findSendButton();
+      if (sendBtn) break;
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(250);
     }
 
-    if (sendBtn) {
-      simulateRealClick(sendBtn);
-    } else {
+    // 强效发送循环：尝试多层点击并严格校验是否成功发出
+    let sendSucceeded = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      sendBtn = findSendButton();
+      if (sendBtn) {
+        simulateRealClick(sendBtn);
+        try { sendBtn.click(); } catch (_) {}
+        const childTarget = sendBtn.querySelector('mat-icon, svg, span');
+        if (childTarget) {
+          try { childTarget.click(); } catch (_) {}
+        }
+      }
+
+      inputEl.focus();
       inputEl.dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'Enter',
@@ -1075,6 +1129,26 @@
           bubbles: true,
         })
       );
+
+      await sleep(700);
+
+      const currentInputText = (inputEl.innerText || '').trim();
+      const queriesNow = getUserQueryElements().length;
+      const stopVisible = isStopButtonVisible();
+
+      // 验证依据：输入框已清空、或者已出现新用户提问气泡、或者已出现 Stop 生成按钮
+      if (!currentInputText || queriesNow > queryCountBefore || stopVisible) {
+        sendSucceeded = true;
+        break;
+      }
+
+      // 未发出则补充派发 input 事件激活按钮
+      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(300);
+    }
+
+    if (!sendSucceeded) {
+      throw new Error('[SEND_FAILED] 提示词未能从网页输入框发送成功，页面发送按钮未响应。');
     }
   }
 
@@ -1132,8 +1206,13 @@
         const currentText = (targetResponseNode.innerText || '').trim();
         const stopVisible = isStopButtonVisible();
 
-        // 检查回答内是否出现拒答固定句式
-        if (/^(I cannot help with that|I'm unable to assist|作为人工智能模型，我无法|很抱歉，我不能)/i.test(currentText)) {
+        // 检查回答内是否出现拒答固定句式（包括官方安全拦截与文本 AI 超出能力等拒答套话）
+        if (
+          /^(I cannot help with that|I'm unable to assist|作为人工智能模型，我无法|很抱歉，我不能|我是一个文本\s*AI|这超出了我的能力范围)/i.test(
+            currentText
+          ) ||
+          /(超出.*?能力范围|无法协助处理此类|无法满足这一请求|beyond my capabilities)/i.test(currentText)
+        ) {
           throw new Error(`[SAFETY_REFUSAL] Argon 拒答: ${currentText.slice(0, 80)}`);
         }
 
