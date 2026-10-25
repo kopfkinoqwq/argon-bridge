@@ -258,10 +258,30 @@ async function dispatchTaskToTab(tabId, taskPayload) {
   try {
     await chrome.tabs.sendMessage(tabId, taskPayload);
   } catch (err) {
+    const errMsg = err.message || '';
+    if (errMsg.includes('Receiving end does not exist') || errMsg.includes('Could not establish connection')) {
+      sendToLocalCli({
+        type: 'STATUS',
+        status: '正在自愈恢复标签页...',
+        detail: '检测到扩展刚被重载，正在自动刷新标签页以挂载全新 content.js 脚本...',
+      });
+      pendingNavigationTask = {
+        tabId,
+        taskPayload,
+        createdAt: Date.now(),
+      };
+      try {
+        await chrome.tabs.reload(tabId);
+        return;
+      } catch (reloadErr) {
+        // 刷新失败则继续抛错
+      }
+    }
+
     sendToLocalCli({
       type: 'ERROR',
       requestId: taskPayload.requestId,
-      error: `无法向目标 Gemini 标签页投递任务 (${err.message})，请确认页面已加载完成。`,
+      error: `无法向目标 Gemini 标签页投递任务 (${errMsg})，请确认页面已加载完成。`,
     });
   }
 }
