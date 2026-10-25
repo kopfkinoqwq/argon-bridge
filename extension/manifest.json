@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.2 (Model & High-Thinking Lock)",
-  "version": "2.2.0",
-  "description": "Bridges local CLI / Google Antigravity with Web Gemini 4 Argon featuring Model & High-Thinking lock and 1:1 Project-to-Chat routing",
+  "name": "Argon Bridge v2.3.0 (Zero-Freeze & Auto-Bind)",
+  "version": "2.3.0",
+  "description": "Argon Bridge v2.3.0: 1:1 Project-to-Chat routing, early session binding, zero-reflow streaming, and physical keepalive",
   "permissions": [
     "tabs",
     "scripting",

@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v2.0 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v2.3.0 - Content Script for https://gemini.google.com/*
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
  * 2. Automatic waiting for rich-textarea readiness after session switching
@@ -163,6 +163,17 @@
           overflow: hidden;
           text-overflow: ellipsis;
         }
+        .version-badge {
+          background: rgba(59, 130, 246, 0.25);
+          color: #93c5fd;
+          border: 1px solid rgba(59, 130, 246, 0.45);
+          padding: 1px 6px;
+          border-radius: 6px;
+          font-size: 10px;
+          font-weight: 700;
+          font-family: monospace;
+          white-space: nowrap;
+        }
         .btn-reconnect {
           background: rgba(59, 130, 246, 0.2);
           color: #93c5fd;
@@ -183,7 +194,8 @@
         <span class="status-dot STANDBY" id="dot"></span>
         <div class="text-col">
           <div class="title-row">
-            <span class="title" id="title">Argon Bridge v2</span>
+            <span class="title" id="title">Argon Bridge</span>
+            <span class="version-badge">v2.3.0</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>

@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v2.0 - Background Service Worker & Stateful Session Router
+ * Argon Bridge v2.3.0 - Background Service Worker & Stateful Session Router
  * Handles:
  * 1. Persistent WebSocket link to ws://127.0.0.1:17420
  * 2. 1:1 Project-to-Chat Tab Routing (multi-tab matching or single-tab URL switching)
