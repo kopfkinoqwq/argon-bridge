@@ -195,7 +195,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.0</span>
+            <span class="version-badge">v2.3.1</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -413,6 +413,30 @@
       }
     }
 
+    return null;
+  }
+
+  function findStopButton() {
+    const stopSelectors = [
+      'button[aria-label*="Stop response"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="停止"]',
+      'button[aria-label*="中断"]',
+      '.stop-icon',
+      'mat-icon[fonticon="stop"]',
+      'mat-icon[data-mat-icon-name="stop"]',
+      'button[data-test-id*="stop"]',
+    ];
+    for (const sel of stopSelectors) {
+      try {
+        const els = Array.from(document.querySelectorAll(sel));
+        for (const el of els) {
+          if (isVisible(el)) {
+            return el.closest('button') || el;
+          }
+        }
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -1258,8 +1282,23 @@
           );
         }
 
-        // 核心稳定性仲裁：只要 Stop 生成按钮仍在，无论思考停顿多久，绝对严禁提前断开！
+        // 核心稳定性仲裁 + 防死锁看门狗（Anti-Zombie Watchdog）：
         if (stopVisible) {
+          // 场景 1：已转圈超 45 秒但未产生任何 1 个 Token（Google 官方云端掉线）
+          // 场景 2：流式输出中途突然停滞超 60 秒（服务端异常挂起）
+          const stuckAtStart = currentLength === 0 && (Date.now() - startTime > 45000);
+          const stuckMidStream = currentLength > 0 && (Date.now() - lastProgressTime > 60000);
+
+          if (stuckAtStart || stuckMidStream) {
+            const stopBtn = findStopButton();
+            if (stopBtn) {
+              try { stopBtn.click(); } catch (_) {}
+            }
+            if (currentLength > 200) {
+              return targetResponseNode;
+            }
+            throw new Error(`[BACKEND_HANG] Google 官方云端流式断流死锁（转圈超 ${stuckAtStart ? '45s 无首字' : '60s 无输出'}）。已自动点击停止按钮解除卡死。`);
+          }
           continue;
         }
 
@@ -1656,21 +1695,29 @@
   function initAutoModelGuard() {
     let lastUrl = window.location.href;
     const checkAndEnforce = async () => {
-      const cid = getCurrentChatIdFromUrl();
-      if (!cid) {
-        await sleep(1200);
-        await ensureTargetModelAndThinking('Argon', 'high');
+      if (isProcessingTask) return;
+      const switcherBtn = findModelSwitcherButton();
+      if (switcherBtn) {
+        const desc = getElementDescriptor(switcherBtn).toLowerCase();
+        // 如果被 Google 偷偷降级为 Flash-Lite 或普通 Flash，自动提醒并纠正
+        if (desc.includes('lite') || desc.includes('flash-lite')) {
+          reportStatus('检测到模型被降级为 Flash-Lite', '正在自动纠正为 Argon...');
+          await sleep(600);
+          await ensureTargetModelAndThinking('Argon', 'high');
+        }
       }
     };
 
-    setTimeout(checkAndEnforce, 2000);
+    setTimeout(checkAndEnforce, 2500);
 
     setInterval(() => {
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         checkAndEnforce();
+      } else {
+        checkAndEnforce();
       }
-    }, 1500);
+    }, 4000);
   }
 
   initAutoModelGuard();
