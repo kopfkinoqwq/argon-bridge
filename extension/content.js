@@ -195,7 +195,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.1</span>
+            <span class="version-badge">v2.3.2</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -1740,57 +1740,34 @@
     }
   }
 
-  // 监听单页路由跳转与新建会话：自动检测并切换为高阶架构师模型 + High 深度思考（守护普通用户手动新建对话）
-  function initAutoModelGuard() {
-    let lastUrl = window.location.href;
-    const checkAndEnforce = async () => {
+  // 纯被动式模型状态感知器（绝对静默原则：严禁在后台未经提问任务授权自动点击用户界面或切模）
+  function initPassiveModelObserver() {
+    const observeStateOnly = () => {
       if (isProcessingTask) return;
       const switcherBtn = findModelSwitcherButton();
       if (!switcherBtn) return;
 
       const desc = getElementDescriptor(switcherBtn).toLowerCase();
 
-      // 如果当前模型处于 Flash-Lite 或普通 Flash
       if (desc.includes('lite') || desc.includes('flash-lite')) {
-        // 如果已确诊为额度耗尽冷却期，严禁盲目强行切回！保持退火状态，并在胶囊清晰提示
         if (checkArgonQuotaExhausted()) {
           updateHud(
             'STANDBY',
-            'Argon 额度已用尽 (冷却中)',
-            '官方额度已达上限，需等待数小时重置 · 本地模型无缝接管中',
+            'Argon 额度冷却中 (当前 Flash-Lite)',
+            '官方额度已满 · 本地模型无缝接管中',
             'QUOTA ⏳'
           );
-          return;
-        }
-
-        // 首次发现降级：温和探测一次是否因为额度耗尽
-        reportStatus('检测到当前处于 Flash-Lite', '正在校验 Argon 额度可用性...');
-        try {
-          await ensureTargetModelAndThinking('Argon', 'high');
-        } catch (err) {
-          if (err.message && err.message.includes('QUOTA_EXHAUSTED')) {
-            reportStatus('Argon 额度耗尽确认', '已自动进入冷却退火状态，严禁死循环切模');
-          }
         }
       } else if (desc.includes('argon') || desc.includes('4 argon') || desc.includes('pro')) {
-        // 成功处于高阶架构师模型，重置额度耗尽标识
         isArgonQuotaExhausted = false;
       }
     };
 
-    setTimeout(checkAndEnforce, 2500);
-
-    setInterval(() => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href;
-        checkAndEnforce();
-      } else {
-        checkAndEnforce();
-      }
-    }, 6000);
+    setTimeout(observeStateOnly, 2000);
+    setInterval(observeStateOnly, 5000);
   }
 
-  initAutoModelGuard();
+  initPassiveModelObserver();
   createFloatingHud();
   connectToBackground();
 })();

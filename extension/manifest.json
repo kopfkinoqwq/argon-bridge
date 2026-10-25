@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.3.1 (Anti-Hang Watchdog & Model Guard)",
-  "version": "2.3.1",
-  "description": "Argon Bridge v2.3.0: 1:1 Project-to-Chat routing, early session binding, zero-reflow streaming, and physical keepalive",
+  "name": "Argon Bridge v2.3.2 (Zero-Interference Silent Guard)",
+  "version": "2.3.2",
+  "description": "Argon Bridge v2.3.2: 1:1 Project-to-Chat routing, early session binding, zero-interference passive guard, and physical keepalive",
   "permissions": [
     "tabs",
     "scripting",
