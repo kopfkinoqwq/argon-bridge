@@ -480,7 +480,19 @@
   // =========================================================================
   // 4. 智能模型与思考深度双重锁定引擎 (Model = Argon & Thinking Effort = High)
   // =========================================================================
-  const DEFAULT_TARGET_MODEL_KEYWORDS = ['argon', '4 argon', 'pro', 'advanced', 'deep think'];
+  const DEFAULT_TARGET_MODEL_KEYWORDS = [
+    'argon',
+    '4 argon',
+    'gemini 4',
+    'pro',
+    'advanced',
+    'deep think',
+    '高级',
+    '思考',
+    '2.5 pro',
+    '1.5 pro',
+    'ultra',
+  ];
 
   const THINKING_LEVEL_SYNONYMS = {
     high: ['high', '高', '深度思考', '深度推理', '深度', '最高', '最大', 'deep', 'maximum', 'extra thorough'],
@@ -765,6 +777,13 @@
         }
       });
     }
+
+    try {
+      const discovered = items.map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      if (discovered.length > 0) {
+        reportStatus('模型下拉选项已展开', `发现菜单项: [${discovered.join(' | ')}]`);
+      }
+    } catch (_) {}
 
     for (const keyword of targetKeywords) {
       const kw = keyword.toLowerCase();
@@ -1165,92 +1184,97 @@
     return current.length > 0 ? current[current.length - 1] : null;
   }
 
-  async function waitForGenerationComplete(targetUserQueryEl, projectName, timeoutMs = 360000) {
+  async function waitForGenerationComplete(targetUserQueryEl, projectName, timeoutMs = 600000) {
     const startTime = Date.now();
     let generationStarted = false;
-    let lastMutationTime = Date.now();
-    let lastObservedText = '';
-
-    const observer = new MutationObserver(() => {
-      lastMutationTime = Date.now();
-    });
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
+    let lastProgressTime = Date.now();
+    let lastObservedLength = 0;
 
     try {
       while (Date.now() - startTime < timeoutMs) {
-        await sleep(500);
+        // 使用 800ms 轮询节奏，绝不挤占主线程，彻底消除“页面未响应”
+        await sleep(800);
 
         // 探测 Google 官方安全策略拦截卡片（如触发敏感词拒答）
         const safetyBlock = findSafetyBlockElement();
         if (safetyBlock) {
-          const blockText = (safetyBlock.innerText || '').replace(/\s+/g, ' ').trim();
+          const blockText = (safetyBlock.textContent || '').replace(/\s+/g, ' ').trim();
           throw new Error(`[SAFETY_BLOCKED] Google 官方安全策略拦截: ${blockText || '触发敏感内容防护'}`);
         }
 
         const responses = getModelResponseElements();
-
-        // 绝对安全隔离：只接受本次提问后新生成的 model-response，严禁匹配任何已有历史节点
         const unhandledResponses = responses.filter((res) => !res.hasAttribute('data-argon-existing'));
         if (unhandledResponses.length === 0) {
-          // 本轮模型的响应容器尚未渲染挂载，继续等待
           continue;
         }
 
         const targetResponseNode = unhandledResponses[unhandledResponses.length - 1];
 
-        const currentText = (targetResponseNode.innerText || '').trim();
+        // 核心性能优化：流式传输期间仅读取 textContent.length，严禁调用 innerText（绝不强制同步重排，零布局颠簸）
+        const currentLength = (targetResponseNode.textContent || '').length;
         const stopVisible = isStopButtonVisible();
 
-        // 检查回答内是否出现拒答固定句式（包括官方安全拦截与文本 AI 超出能力等拒答套话）
-        if (
-          /^(I cannot help with that|I'm unable to assist|作为人工智能模型，我无法|很抱歉，我不能|我是一个文本\s*AI|这超出了我的能力范围)/i.test(
-            currentText
-          ) ||
-          /(超出.*?能力范围|无法协助处理此类|无法满足这一请求|beyond my capabilities)/i.test(currentText)
-        ) {
-          throw new Error(`[SAFETY_REFUSAL] Argon 拒答: ${currentText.slice(0, 80)}`);
+        // 拒答快速检测：仅在文本极短时提取开头进行正则断言
+        if (currentLength < 250) {
+          const prefixText = (targetResponseNode.textContent || '').slice(0, 150).trim();
+          if (
+            /^(I cannot help with that|I'm unable to assist|作为人工智能模型，我无法|很抱歉，我不能|我是一个文本\s*AI|这超出了我的能力范围|我只是一个语言模型)/i.test(
+              prefixText
+            ) ||
+            /(超出.*?能力范围|无法协助处理此类|无法满足这一请求|没法帮到你|beyond my capabilities)/i.test(prefixText)
+          ) {
+            throw new Error(`[SAFETY_REFUSAL] Argon 拒答: ${prefixText.slice(0, 80)}`);
+          }
         }
 
         if (!generationStarted) {
-          if (stopVisible || currentText.length > 0) {
+          if (stopVisible || currentLength > 0) {
             generationStarted = true;
-            lastMutationTime = Date.now();
-            reportStatus(`Argon 正在回复 [${projectName}]`, '已检测到流式输出');
+            lastProgressTime = Date.now();
+            reportStatus(`Argon 正在思考/回复 [${projectName}]`, '已检测到生成状态');
           }
           continue;
         }
 
-        if (currentText !== lastObservedText) {
-          lastObservedText = currentText;
-          lastMutationTime = Date.now();
+        if (currentLength !== lastObservedLength) {
+          lastObservedLength = currentLength;
+          lastProgressTime = Date.now();
           const elapsedSec = Math.round((Date.now() - startTime) / 1000);
           reportStatus(
             `正在接收 [${projectName}] 回复...`,
-            `已生成 ${currentText.length} 字符 (${elapsedSec}s)`
+            `已生成约 ${currentLength} 字符 (${elapsedSec}s)`
           );
         }
 
-        const quietDuration = Date.now() - lastMutationTime;
-        const isSubstantial = currentText.length > 30;
-        const isNotJustThinking =
-          !/^thinking(\.\.\.)?$/i.test(currentText) &&
-          !/^思考中(\.\.\.)?$/i.test(currentText);
+        // 核心稳定性仲裁：只要 Stop 生成按钮仍在，无论思考停顿多久，绝对严禁提前断开！
+        if (stopVisible) {
+          continue;
+        }
 
-        if (!stopVisible && isSubstantial && isNotJustThinking && quietDuration >= 3500) {
-          await sleep(600);
-          if (!isStopButtonVisible()) {
-            return targetResponseNode;
-          }
+        // Stop 按钮已消失后的静默仲裁
+        const quietDuration = Date.now() - lastProgressTime;
+        const copyBtn = findCopyButtonForResponse(targetResponseNode);
+        const isSubstantial = currentLength > 50;
+
+        // 完工判定：Stop 按钮消失且（复制按钮已渲染 或 静默时间 >= 3000ms）
+        if (isSubstantial && (copyBtn || quietDuration >= 3000)) {
+          return targetResponseNode;
         }
       }
+
+      // 超时兜底：若已有实质性模型回复（例如长文本推演），优先返回已有成果
+      const fallbackResponses = getModelResponseElements();
+      const fallbackUnhandled = fallbackResponses.filter((res) => !res.hasAttribute('data-argon-existing'));
+      if (fallbackUnhandled.length > 0) {
+        const candidate = fallbackUnhandled[fallbackUnhandled.length - 1];
+        if ((candidate.textContent || '').length > 200) {
+          return candidate;
+        }
+      }
+
       throw new Error('等待 Gemini 4 Argon 生成回复超时。请确认网页端未处于卡顿或遮罩状态。');
     } finally {
-      observer.disconnect();
+      // 循环结束无常驻资源需释放
     }
   }
 
@@ -1536,6 +1560,24 @@
         badgeLabel
       );
 
+      // 核心 1:1 会话隔离升级：提示词刚发出后立即探测 URL 中的新 chatId 并即时向本地回传持久化！
+      // 绝不等数分钟回复结束才绑定，彻底杜绝单项目产生多条冗余会话！
+      (async () => {
+        try {
+          const earlyCid = await waitForChatIdInUrl(6000);
+          if (earlyCid && earlyCid !== task.chatId) {
+            sendMessageToBackground({
+              type: 'SESSION_BOUND',
+              requestId: task.requestId,
+              projectKey: task.projectKey,
+              projectName,
+              chatId: earlyCid,
+              chatUrl: `https://gemini.google.com/app/${earlyCid}`,
+            });
+          }
+        } catch (_) {}
+      })();
+
       // 跟踪本轮提问所生成的最新 user-query 节点
       const latestUserQueryNode = await waitForNewUserQuery(queryCountBefore, 6000);
 
@@ -1543,7 +1585,7 @@
       const latestResponseNode = await waitForGenerationComplete(
         latestUserQueryNode,
         projectName,
-        360000
+        600000
       );
       if (latestResponseNode) {
         latestResponseNode.setAttribute('data-argon-existing', 'true');

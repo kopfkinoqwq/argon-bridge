@@ -222,6 +222,7 @@ function parseArgs(argv) {
     thinkingLevel: 'high',
     bindTarget: null,
     listOnly: false,
+    getLatest: false,
     port: DEFAULT_PORT,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   };
@@ -248,6 +249,8 @@ function parseArgs(argv) {
       config.newChat = true;
     } else if (arg === '--reload' || arg === '-r') {
       config.reload = true;
+    } else if (arg === '--latest' || arg === '--fetch' || arg === '-L') {
+      config.getLatest = true;
     } else if (arg === '--bind') {
       config.bindTarget = args[++i];
     } else if (arg === '--list' || arg === '-l' || arg === '--list-sessions') {
@@ -282,8 +285,8 @@ function parseArgs(argv) {
     config.prompt = positional.join(' ').trim();
   }
 
-  if (!config.prompt) {
-    logError('提问内容不能为空。请提供提问字符串或使用 --file <path> 指定文件。');
+  if (!config.prompt && !config.getLatest) {
+    logError('提问内容不能为空。请提供提问字符串或使用 --file <path> 指定文件，或使用 --latest 提取最新回复。');
     printHelp();
     process.exit(1);
   }
@@ -383,7 +386,7 @@ function main() {
       promptDispatched = true;
       ws.send(
         JSON.stringify({
-          type: 'ASK_ARGON',
+          type: config.getLatest ? 'GET_LATEST_RESPONSE' : 'ASK_ARGON',
           requestId,
           projectKey: projectCtx.projectKey,
           projectName: projectCtx.projectName,
@@ -394,7 +397,7 @@ function main() {
           reload: Boolean(config.reload),
           model: config.model || 'Argon',
           thinkingLevel: config.thinkingLevel || 'high',
-          prompt: effectivePrompt,
+          prompt: effectivePrompt || '',
           timestamp: Date.now(),
         })
       );
@@ -420,6 +423,17 @@ function main() {
 
       if (msg.type === 'STATUS') {
         logInfo(`[浏览器路由状态] ${msg.status}${msg.detail ? ' - ' + msg.detail : ''}`);
+        return;
+      }
+
+      if (msg.type === 'SESSION_BOUND') {
+        const returnedChatId = normalizeChatId(msg.chatId) || normalizeChatId(msg.chatUrl);
+        if (returnedChatId) {
+          const savedRecord = persistProjectSession(projectCtx, returnedChatId, msg.chatUrl);
+          if (savedRecord) {
+            logSuccess(`[会话即时绑定] 项目 [${projectCtx.projectName}] 已成功锁定专属会话: ${savedRecord.chatUrl}`);
+          }
+        }
         return;
       }
 

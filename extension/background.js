@@ -110,6 +110,8 @@ function connectWebSocket(force = false) {
 
       if (data.type === 'ASK_ARGON') {
         await routeAndExecuteTask(data);
+      } else if (data.type === 'GET_LATEST_RESPONSE') {
+        await extractLatestResponseFromTab(data);
       } else if (data.type === 'ACK') {
         broadcastWsState('CONNECTED', `已完成 [${data.projectName || '项目'}] 回复同步`);
       }
@@ -255,6 +257,84 @@ async function dispatchTaskToTab(tabId, taskPayload) {
   }
 }
 
+async function extractLatestResponseFromTab(taskPayload) {
+  const tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
+  if (!tabs || tabs.length === 0) {
+    sendToLocalCli({
+      type: 'ERROR',
+      requestId: taskPayload.requestId,
+      error: '未找到已打开的 https://gemini.google.com 标签页。',
+    });
+    return;
+  }
+  const targetChatId = taskPayload.chatId;
+  const matchedTab = (targetChatId ? tabs.find((t) => extractChatIdFromUrl(t.url) === targetChatId) : null) || tabs.find((t) => t.active) || tabs[0];
+
+  sendToLocalCli({
+    type: 'STATUS',
+    status: `正在直接提取标签页中的最新回复...`,
+    detail: `Tab: ${matchedTab.id} | URL: ${matchedTab.url}`,
+  });
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: matchedTab.id },
+      func: () => {
+        const selectors = [
+          'model-response',
+          'message-content',
+          '.model-response-text',
+          'div[data-message-author-role="model"]',
+          '.markdown',
+        ];
+        let targetNode = null;
+        for (const sel of selectors) {
+          const els = Array.from(document.querySelectorAll(sel));
+          if (els.length > 0) {
+            targetNode = els[els.length - 1];
+            break;
+          }
+        }
+        if (!targetNode) return { error: '未找到模型响应内容' };
+
+        return {
+          innerText: (targetNode.innerText || '').trim(),
+          url: window.location.href,
+        };
+      },
+    });
+
+    if (results && results[0] && results[0].result) {
+      const res = results[0].result;
+      if (res.error) {
+        sendToLocalCli({ type: 'ERROR', requestId: taskPayload.requestId, error: res.error });
+      } else {
+        sendToLocalCli({
+          type: 'RESPONSE',
+          requestId: taskPayload.requestId,
+          chatId: targetChatId || extractChatIdFromUrl(res.url),
+          chatUrl: res.url,
+          markdown: res.innerText,
+          source: 'chrome-scripting-extract',
+          timestamp: Date.now(),
+        });
+      }
+    } else {
+      sendToLocalCli({
+        type: 'ERROR',
+        requestId: taskPayload.requestId,
+        error: 'executeScript 未返回结果',
+      });
+    }
+  } catch (err) {
+    sendToLocalCli({
+      type: 'ERROR',
+      requestId: taskPayload.requestId,
+      error: '脚本提取失败: ' + err.message,
+    });
+  }
+}
+
 // 监听来自 content.js 的长连接
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'argon-keepalive-port') return;
@@ -298,6 +378,24 @@ chrome.runtime.onConnect.addListener((port) => {
     }
 
     if (msg.type === 'STATUS' || msg.type === 'ERROR') {
+      sendToLocalCli(msg);
+      return;
+    }
+
+    if (msg.type === 'SESSION_BOUND') {
+      if (msg.projectKey && msg.chatId) {
+        try {
+          const store = await chrome.storage.local.get(['argonSessions']);
+          const sessions = store.argonSessions || {};
+          sessions[msg.projectKey] = {
+            projectName: msg.projectName,
+            chatId: msg.chatId,
+            chatUrl: msg.chatUrl,
+            updatedAt: Date.now(),
+          };
+          await chrome.storage.local.set({ argonSessions: sessions });
+        } catch (_) {}
+      }
       sendToLocalCli(msg);
       return;
     }
