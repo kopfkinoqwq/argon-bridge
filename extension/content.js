@@ -789,6 +789,37 @@
     return false;
   }
 
+  // =========================================================================
+  // 3.5 官方高阶额度耗尽与退火冷却管理器 (Argon Quota & Backoff Manager)
+  // =========================================================================
+  let isArgonQuotaExhausted = false;
+  let quotaExhaustedDetectedAt = 0;
+  const QUOTA_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 冷却期 2 小时
+
+  function checkArgonQuotaExhausted() {
+    if (isArgonQuotaExhausted) {
+      if (Date.now() - quotaExhaustedDetectedAt > QUOTA_COOLDOWN_MS) {
+        isArgonQuotaExhausted = false;
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function setArgonQuotaExhausted(exhausted = true, reason = '') {
+    isArgonQuotaExhausted = exhausted;
+    quotaExhaustedDetectedAt = exhausted ? Date.now() : 0;
+    if (exhausted) {
+      updateHud(
+        'STANDBY',
+        'Argon 额度已用尽 (冷却中)',
+        reason || '官方使用限额已满，需等待数小时 · 本地执行官无缝接管',
+        'QUOTA ⏳'
+      );
+    }
+  }
+
   function findTargetModelOptionInOverlay(targetKeywords) {
     const overlayRoot = document.querySelector('.cdk-overlay-container');
     if (!overlayRoot) return null;
@@ -836,6 +867,16 @@
               matchedKeyword: keyword,
               fullText: (item.innerText || '').replace(/\s+/g, ' ').trim(),
               alreadySelected: isElementSelected(item),
+            };
+          } else {
+            // 选项存在但被官方置灰禁用 -> 100% 确诊官方额度耗尽！
+            setArgonQuotaExhausted(true, 'Argon 选项被官方置灰禁用（当前周期额度已达上限）');
+            return {
+              element: item,
+              matchedKeyword: keyword,
+              fullText: (item.innerText || '').replace(/\s+/g, ' ').trim(),
+              isDisabled: true,
+              quotaExhausted: true,
             };
           }
         }
@@ -913,6 +954,10 @@
       : DEFAULT_TARGET_MODEL_KEYWORDS;
     const targetTier = (preferredThinkingTier || 'high').toLowerCase();
 
+    if (checkArgonQuotaExhausted()) {
+      throw new Error('[QUOTA_EXHAUSTED] 云端 Gemini 4 Argon 官方额度已耗尽（需等待几小时重置）。已触发自动退火，请由本地执行官接管解答。');
+    }
+
     let finalModelLabel = preferredModel;
     let thinkingLocked = false;
 
@@ -949,6 +994,10 @@
         }
 
         if (modelOpt) {
+          if (modelOpt.quotaExhausted) {
+            await closeActiveOverlays();
+            throw new Error('[QUOTA_EXHAUSTED] 云端 Gemini 4 Argon 官方额度已耗尽（选项已被官方禁用，需等待数小时重置）。已自动触发退火保护，请由本地执行官接管。');
+          }
           if (!modelOpt.alreadySelected) {
             simulateRealClick(modelOpt.element);
             await sleep(450);
@@ -1697,14 +1746,35 @@
     const checkAndEnforce = async () => {
       if (isProcessingTask) return;
       const switcherBtn = findModelSwitcherButton();
-      if (switcherBtn) {
-        const desc = getElementDescriptor(switcherBtn).toLowerCase();
-        // 如果被 Google 偷偷降级为 Flash-Lite 或普通 Flash，自动提醒并纠正
-        if (desc.includes('lite') || desc.includes('flash-lite')) {
-          reportStatus('检测到模型被降级为 Flash-Lite', '正在自动纠正为 Argon...');
-          await sleep(600);
-          await ensureTargetModelAndThinking('Argon', 'high');
+      if (!switcherBtn) return;
+
+      const desc = getElementDescriptor(switcherBtn).toLowerCase();
+
+      // 如果当前模型处于 Flash-Lite 或普通 Flash
+      if (desc.includes('lite') || desc.includes('flash-lite')) {
+        // 如果已确诊为额度耗尽冷却期，严禁盲目强行切回！保持退火状态，并在胶囊清晰提示
+        if (checkArgonQuotaExhausted()) {
+          updateHud(
+            'STANDBY',
+            'Argon 额度已用尽 (冷却中)',
+            '官方额度已达上限，需等待数小时重置 · 本地模型无缝接管中',
+            'QUOTA ⏳'
+          );
+          return;
         }
+
+        // 首次发现降级：温和探测一次是否因为额度耗尽
+        reportStatus('检测到当前处于 Flash-Lite', '正在校验 Argon 额度可用性...');
+        try {
+          await ensureTargetModelAndThinking('Argon', 'high');
+        } catch (err) {
+          if (err.message && err.message.includes('QUOTA_EXHAUSTED')) {
+            reportStatus('Argon 额度耗尽确认', '已自动进入冷却退火状态，严禁死循环切模');
+          }
+        }
+      } else if (desc.includes('argon') || desc.includes('4 argon') || desc.includes('pro')) {
+        // 成功处于高阶架构师模型，重置额度耗尽标识
+        isArgonQuotaExhausted = false;
       }
     };
 
@@ -1717,7 +1787,7 @@
       } else {
         checkAndEnforce();
       }
-    }, 4000);
+    }, 6000);
   }
 
   initAutoModelGuard();
