@@ -201,6 +201,15 @@ async function routeAndExecuteTask(taskPayload) {
       createdAt: Date.now(),
     };
 
+    // SPA 单页切流兜底：2 秒后若单页应用未触发刷新，直接向已有连接派发任务
+    setTimeout(() => {
+      if (pendingNavigationTask && pendingNavigationTask.tabId === tabToSwitch.id) {
+        const taskToRun = pendingNavigationTask.taskPayload;
+        pendingNavigationTask = null;
+        dispatchTaskToTab(tabToSwitch.id, taskToRun);
+      }
+    }, 2000);
+
     await chrome.tabs.update(tabToSwitch.id, { url: targetUrl });
     return;
   }
@@ -336,6 +345,19 @@ async function extractLatestResponseFromTab(taskPayload) {
 }
 
 // 监听来自 content.js 的长连接
+// 监听单页路由跳转与标签页更新，解决 Angular SPA 单页跳转不触发 onConnect 的问题
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (pendingNavigationTask && pendingNavigationTask.tabId === tabId) {
+    if (changeInfo.status === 'complete' || (changeInfo.url && pendingNavigationTask.taskPayload.chatId && changeInfo.url.includes(pendingNavigationTask.taskPayload.chatId))) {
+      const taskToRun = pendingNavigationTask.taskPayload;
+      pendingNavigationTask = null;
+      setTimeout(() => {
+        dispatchTaskToTab(tabId, taskToRun);
+      }, 800);
+    }
+  }
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'argon-keepalive-port') return;
 
