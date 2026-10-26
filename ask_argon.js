@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * argon-bridge v2.3.2: Local CLI & Project-to-Chat 1:1 Session Manager
+ * argon-bridge v2.3.3: Local CLI & Project-to-Chat 1:1 Session Manager
  * Port: 17420 (127.0.0.1)
  */
 
@@ -356,7 +356,7 @@ function main() {
 
   wss.on('listening', () => {
     process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
-    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.3.2)... │\x1b[0m\n`);
+    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.3.3)... │\x1b[0m\n`);
     process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
     logInfo(`本地 WebSocket 服务已启动: ws://127.0.0.1:${config.port}`);
     logInfo(

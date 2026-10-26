@@ -81,6 +81,7 @@
     titleEl: null,
     badgeEl: null,
     detailEl: null,
+    newChatBtn: null,
     reconnectBtn: null,
   };
 
@@ -174,6 +175,22 @@
           font-family: monospace;
           white-space: nowrap;
         }
+        .btn-newchat {
+          background: rgba(16, 185, 129, 0.2);
+          color: #6ee7b7;
+          border: 1px solid rgba(16, 185, 129, 0.4);
+          border-radius: 999px;
+          padding: 4px 10px;
+          font-size: 11px;
+          font-weight: 500;
+          cursor: pointer;
+          white-space: nowrap;
+          transition: all 0.2s;
+        }
+        .btn-newchat:hover {
+          background: rgba(16, 185, 129, 0.45);
+          color: #ffffff;
+        }
         .btn-reconnect {
           background: rgba(59, 130, 246, 0.2);
           color: #93c5fd;
@@ -195,11 +212,12 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.2</span>
+            <span class="version-badge">v2.3.3</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
         </div>
+        <button class="btn-newchat" id="newChatBtn" title="开启全新会话，释放膨胀的 DOM 节点与网页卡顿">🔄 新开会话</button>
         <button class="btn-reconnect" id="reconnectBtn" title="手动触发连接本地 17420 端口">立即连接</button>
       </div>
     `;
@@ -211,7 +229,15 @@
     hudState.titleEl = shadow.getElementById('title');
     hudState.badgeEl = shadow.getElementById('badge');
     hudState.detailEl = shadow.getElementById('detail');
+    hudState.newChatBtn = shadow.getElementById('newChatBtn');
     hudState.reconnectBtn = shadow.getElementById('reconnectBtn');
+
+    if (hudState.newChatBtn) {
+      hudState.newChatBtn.addEventListener('click', async () => {
+        updateHud('WORKING', 'Argon Bridge: 正在重置', '正在开启全新干净会话释放 DOM 内存...');
+        await ensureCleanNewChatIfRequired(true);
+      });
+    }
 
     hudState.reconnectBtn.addEventListener('click', () => {
       updateHud('CONNECTING', 'Argon Bridge: 重连中', '正在连接 ws://127.0.0.1:17420...');
@@ -419,13 +445,20 @@
   function findStopButton() {
     const stopSelectors = [
       'button[aria-label*="Stop response"]',
+      'button[aria-label*="Stop generating"]',
+      'button[aria-label*="Stop streaming"]',
       'button[aria-label*="Stop"]',
+      'button[aria-label*="停止生成"]',
+      'button[aria-label*="停止响应"]',
       'button[aria-label*="停止"]',
       'button[aria-label*="中断"]',
+      'button.stop-button',
       '.stop-icon',
       'mat-icon[fonticon="stop"]',
       'mat-icon[data-mat-icon-name="stop"]',
       'button[data-test-id*="stop"]',
+      'button svg rect',
+      'button mat-icon rect',
     ];
     for (const sel of stopSelectors) {
       try {
@@ -443,13 +476,19 @@
   function isStopButtonVisible() {
     const stopSelectors = [
       'button[aria-label*="Stop response"]',
+      'button[aria-label*="Stop generating"]',
+      'button[aria-label*="Stop streaming"]',
       'button[aria-label*="Stop"]',
+      'button[aria-label*="停止生成"]',
+      'button[aria-label*="停止响应"]',
       'button[aria-label*="停止"]',
       'button[aria-label*="中断"]',
+      'button.stop-button',
       '.stop-icon',
       'mat-icon[fonticon="stop"]',
       'mat-icon[data-mat-icon-name="stop"]',
       'button[data-test-id*="stop"]',
+      'button svg rect',
       '.sparkle-generating',
       '[data-is-generating="true"]',
     ];
@@ -1151,6 +1190,8 @@
       'button[aria-label*="New chat"]',
       'button[aria-label*="新对话"]',
       'button[aria-label*="发起新对话"]',
+      '[data-test-id="side-nav-new-chat-button"]',
+      'side-nav-button[data-test-id="new-chat"]',
     ];
 
     for (const sel of newChatSelectors) {
@@ -1161,10 +1202,26 @@
         return;
       }
     }
+
+    // 强效兜底：直接跳转到 /app 根路径开启全新纯净对话
+    if (currentCid) {
+      window.location.href = 'https://gemini.google.com/app';
+      await sleep(1500);
+    }
   }
 
   async function injectPromptAndSend(promptText) {
     await closeActiveOverlays();
+
+    // 关键自愈：如果页面当前残留着之前卡死的 Stop 按钮，先尝试点击停止并重置输入栏
+    if (isStopButtonVisible()) {
+      reportStatus('正在解除卡死状态', '检测到上一次生成残留的停止按钮，自动重置...');
+      const oldStopBtn = findStopButton();
+      if (oldStopBtn) {
+        try { oldStopBtn.click(); } catch (_) {}
+        await sleep(1000);
+      }
+    }
 
     const inputEl = await waitForInputReady(20000);
 
@@ -1287,9 +1344,32 @@
           throw new Error(`[SAFETY_BLOCKED] Google 官方安全策略拦截: ${blockText || '触发敏感内容防护'}`);
         }
 
+        const stopVisible = isStopButtonVisible();
+
         const responses = getModelResponseElements();
         const unhandledResponses = responses.filter((res) => !res.hasAttribute('data-argon-existing'));
         if (unhandledResponses.length === 0) {
+          if (stopVisible) {
+            generationStarted = true;
+            reportStatus(`Argon 正在思考 [${projectName}]`, '云端准备中 (Stop 按钮已激活)...');
+            // 如果 Stop 按钮亮起转圈已超 35 秒，但服务端连一个回复气泡容器都还没创建（Google 云端死锁 / 历史上下文过大超时）：
+            if (Date.now() - startTime > 35000) {
+              const stopBtn = findStopButton();
+              if (stopBtn) {
+                try { stopBtn.click(); } catch (_) {}
+              }
+              throw new Error(
+                `[SESSION_OVERLOAD] Google 官方云端流式断流/超时（转圈超 35s 未创建回复气泡）。\n` +
+                `根本原因：当前项目会话积累了过多历史长文本（超 5 万 DOM 节点），导致 Google 服务端推理上下文超载或死锁。\n` +
+                `插件已自动点击停止按钮重置状态。强烈建议执行: node ask_argon.js --new-chat "你的问题" 开启极速新会话！`
+              );
+            }
+          } else {
+            // 没有 Stop 按钮，且过了 12 秒依然没有任何反应，说明网页端未能顺利发送或渲染
+            if (Date.now() - startTime > 12000) {
+              throw new Error(`[DISPATCH_LOST] 提示词提交 12 秒后未检测到 Google 生成状态。可能是网页端卡死或发送按钮失灵，建议刷新页面重试。`);
+            }
+          }
           continue;
         }
 
@@ -1297,7 +1377,6 @@
 
         // 核心性能优化：流式传输期间仅读取 textContent.length，严禁调用 innerText（绝不强制同步重排，零布局颠簸）
         const currentLength = (targetResponseNode.textContent || '').length;
-        const stopVisible = isStopButtonVisible();
 
         // 拒答快速检测：仅在文本极短时提取开头进行正则断言
         if (currentLength < 250) {
@@ -1760,6 +1839,18 @@
         }
       } else if (desc.includes('argon') || desc.includes('4 argon') || desc.includes('pro')) {
         isArgonQuotaExhausted = false;
+      }
+
+      // 会话过长探测（DOM 膨胀预警）：若当前会话回复卡片 >= 12，且未在提问中，在 HUD 提示优化
+      const responseCount = getModelResponseElements().length;
+      if (responseCount >= 12 && !isArgonQuotaExhausted) {
+        const cid = getCurrentChatIdFromUrl();
+        updateHud(
+          'STANDBY',
+          'Argon Bridge: 待命中',
+          `当前会话已积累 ${responseCount} 条对话 (DOM 较重)，建议点击“新开会话”`,
+          cid ? `#${cid.slice(0, 6)} ⚠️` : 'OVERLOAD ⚠️'
+        );
       }
     };
 
