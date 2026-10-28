@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * argon-bridge v2.3.3: Local CLI & Project-to-Chat 1:1 Session Manager
+ * argon-bridge v2.3.4: Local CLI & Project-to-Chat 1:1 Session Manager
  * Port: 17420 (127.0.0.1)
  */
 
@@ -356,7 +356,7 @@ function main() {
 
   wss.on('listening', () => {
     process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
-    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.3.3)... │\x1b[0m\n`);
+    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.3.4)... │\x1b[0m\n`);
     process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
     logInfo(`本地 WebSocket 服务已启动: ws://127.0.0.1:${config.port}`);
     logInfo(
@@ -455,7 +455,9 @@ function main() {
         process.stderr.write(`\x1b[1;32m│  🏛️ 架构师蓝图已送达：云端 Gemini 4 Argon 输出完毕！          │\x1b[0m\n`);
         process.stderr.write(`\x1b[1;32m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
 
-        logSuccess(`已收到 [${projectCtx.projectName}] 专属会话回复！(提取方式: ${source}, 长度: ${markdown.length} 字符)`);
+        const modelLabel = msg.model || 'Argon';
+        const thinkingLabel = msg.thinkingLevel || 'HIGH';
+        logSuccess(`已收到 [${projectCtx.projectName}] 专属会话回复！(模型: ${modelLabel}, 深度思考: ${thinkingLabel}, 提取: ${source}, 长度: ${markdown.length} 字符)`);
 
         // 持久化保存或更新当前项目绑定的 chatId
         if (returnedChatId) {

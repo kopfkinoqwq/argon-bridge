@@ -212,7 +212,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.3</span>
+            <span class="version-badge">v2.3.4</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -598,6 +598,31 @@
     el.click();
   }
 
+  function simulateHover(el) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
+    el.dispatchEvent(new PointerEvent('pointerenter', opts));
+    el.dispatchEvent(new MouseEvent('mouseenter', opts));
+    el.dispatchEvent(new PointerEvent('pointerover', opts));
+    el.dispatchEvent(new MouseEvent('mouseover', opts));
+  }
+
+  function getCleanElementText(el) {
+    if (!el) return '';
+    try {
+      const clone = el.cloneNode(true);
+      clone
+        .querySelectorAll('mat-icon, svg, .material-symbols-outlined, .google-symbols, mat-spinner')
+        .forEach((n) => n.remove());
+      return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
+    } catch (_) {
+      return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
   function getElementDescriptor(el) {
     if (!el) return '';
     const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -762,6 +787,7 @@
 
   function matchesThinkingTier(el, tierKey = 'high') {
     if (!el) return false;
+    const cleanText = getCleanElementText(el).toLowerCase();
     const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
     const ariaText = (
       (el.getAttribute('aria-label') || '') +
@@ -774,33 +800,55 @@
       .trim()
       .toLowerCase();
 
-    if (/\b(flash-lite|3\.8\s*flash|3\.5\s*flash|gemini\s*4\s*argon|gemini\s*3)\b/i.test(rawText) && rawText.length > 25) {
+    // 过滤掉整个模型名长文本（防止误伤含有该词汇的模型选项本身）
+    if (/\b(flash-lite|3\.8\s*flash|3\.5\s*flash|gemini\s*4\s*argon|gemini\s*3)\b/i.test(cleanText) && cleanText.length > 25) {
       return false;
     }
 
     if (tierKey === 'high') {
-      if (/^(low|medium|minimal|低|中)\b/i.test(rawText)) return false;
+      if (/^(low|medium|minimal|off|低|中|关闭)\b/i.test(cleanText)) return false;
       if (
-        /\b(high|maximum|extra\s*thorough)\b/i.test(rawText) ||
+        cleanText === '高' ||
+        cleanText === 'high' ||
+        cleanText === '深度思考' ||
+        cleanText === '深度推理' ||
+        cleanText === '高思考' ||
+        cleanText === '高推理' ||
+        cleanText === 'maximum' ||
+        /^(高|深度|深度思考|深度推理|最大|最高)(\s|$|（|\()/i.test(cleanText) ||
+        /\b(high|maximum|extra\s*thorough)\b/i.test(cleanText) ||
         /\b(high)\b/i.test(ariaText) ||
-        /^(高|深度|深度思考|深度推理|最大|最高)(\s|$|（|\()/i.test(rawText) ||
-        /(思考|推理|thinking|effort|level).*?(high|高|深度|最大)/i.test(`${rawText}${ariaText}`)
+        /(思考|推理|thinking|effort|level).*?(high|高|深度|最大)/i.test(`${cleanText} ${ariaText}`) ||
+        /(high|高|深度|最大).*?(思考|推理|thinking|effort|level)/i.test(`${cleanText} ${ariaText}`) ||
+        (/高/.test(cleanText) && cleanText.length <= 10 && !/[低中]/.test(cleanText))
       ) {
         return true;
       }
     } else if (tierKey === 'low') {
       if (
-        /\b(low|minimal)\b/i.test(rawText) ||
+        cleanText === '低' ||
+        cleanText === 'low' ||
+        cleanText === '轻量' ||
+        cleanText === '快速' ||
+        cleanText === 'minimal' ||
+        /^(低|轻量|快速|浅度)(\s|$|（|\()/i.test(cleanText) ||
+        /\b(low|minimal|fast|quick)\b/i.test(cleanText) ||
         /\b(low|minimal)\b/i.test(ariaText) ||
-        /^(低|轻量|快速|浅度)(\s|$|（|\()/i.test(rawText)
+        (/低/.test(cleanText) && cleanText.length <= 10 && !/[高中]/.test(cleanText))
       ) {
         return true;
       }
     } else if (tierKey === 'medium') {
       if (
-        /\b(medium|balanced)\b/i.test(rawText) ||
+        cleanText === '中' ||
+        cleanText === 'medium' ||
+        cleanText === '中等' ||
+        cleanText === '标准' ||
+        cleanText === '均衡' ||
+        /^(中|中等|标准|均衡)(\s|$|（|\()/i.test(cleanText) ||
+        /\b(medium|balanced|standard)\b/i.test(cleanText) ||
         /\b(medium)\b/i.test(ariaText) ||
-        /^(中|中等|标准|均衡)(\s|$|（|\()/i.test(rawText)
+        (/中/.test(cleanText) && cleanText.length <= 10 && !/[高低]/.test(cleanText))
       ) {
         return true;
       }
@@ -812,18 +860,24 @@
   function isDescriptorAlreadyAtTier(descText, targetTier = 'high') {
     if (!descText) return false;
     const norm = descText.replace(/\s+/g, ' ').trim().toLowerCase();
-    const synonyms = THINKING_LEVEL_SYNONYMS[targetTier] || THINKING_LEVEL_SYNONYMS.high;
 
-    if (targetTier === 'high' && /(\b(low|medium|minimal)\b|[:：\s](低|中|轻量|标准)(?:$|\s|\)))/i.test(norm)) {
-      return false;
-    }
-
-    for (const word of synonyms) {
-      const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const reg = /^[a-z]+$/i.test(word) ? new RegExp(`\\b${escaped}\\b`, 'i') : new RegExp(escaped, 'i');
-      if (reg.test(norm)) {
+    if (targetTier === 'high') {
+      // 若包含 low / 低 / 中，绝不是 High
+      if (/(\b(low|medium|minimal|off)\b|[:：\s](低|中|轻量|标准|关闭)(?:$|\s|\)))/i.test(norm)) {
+        return false;
+      }
+      if (
+        /\b(high|maximum|deep)\b/i.test(norm) ||
+        /(高|深度思考|深度推理|深度|最高|最大)/.test(norm)
+      ) {
         return true;
       }
+      return false;
+    } else if (targetTier === 'low') {
+      if (/(\b(high|medium)\b|[:：\s](高|中)(?:$|\s|\)))/i.test(norm)) {
+        return false;
+      }
+      return /\b(low|minimal|fast)\b/i.test(norm) || /(低|轻量|快速|浅度)/.test(norm);
     }
     return false;
   }
@@ -929,15 +983,25 @@
     if (!overlayRoot) return null;
 
     const candidateSelectors = [
+      'button[role="menuitem"]',
+      'button[role="menuitemradio"]',
+      'button[role="radio"]',
+      '[role="menuitem"]',
+      '[role="menuitemradio"]',
+      '[role="radio"]',
       'mat-button-toggle button',
       'mat-button-toggle',
-      'button[role="radio"]',
-      'button[role="menuitemradio"]',
-      'button[role="menuitem"]',
+      'mat-radio-button',
+      '.mat-mdc-radio-button',
       '[role="option"]',
       'mat-option',
       '.mat-mdc-menu-item',
       '.cdk-overlay-pane button',
+      '.cdk-overlay-pane [tabindex="0"]',
+      '.cdk-overlay-pane [role="button"]',
+      'mat-chip-option',
+      '[data-test-id*="thinking"]',
+      '[data-test-id*="tier"]',
     ];
 
     const candidates = [];
@@ -949,11 +1013,13 @@
       });
     }
 
+    // 1. 优先寻找直接匹配目标思考档位 (如 "高" / "High") 的选项
     for (const item of candidates) {
       if (matchesThinkingTier(item, targetTier)) {
         const clickable =
-          item.tagName.toLowerCase() === 'mat-button-toggle'
-            ? item.querySelector('button') || item
+          item.tagName.toLowerCase() === 'mat-button-toggle' ||
+          item.tagName.toLowerCase() === 'mat-radio-button'
+            ? item.querySelector('button, input, [role="radio"]') || item
             : item;
         const isDisabled =
           clickable.disabled ||
@@ -963,24 +1029,34 @@
           return {
             element: clickable,
             alreadySelected: isElementSelected(item) || isElementSelected(clickable),
-            label: (item.innerText || '').replace(/\s+/g, ' ').trim() || targetTier.toUpperCase(),
+            label: getCleanElementText(item) || targetTier.toUpperCase(),
           };
         }
       }
     }
 
+    // 2. 若未直接出现档位，寻找“思考”或“推理”等二级设置或子菜单触发器
     for (const item of candidates) {
+      const clean = getCleanElementText(item).toLowerCase();
       const desc = getElementDescriptor(item).toLowerCase();
       if (
-        /\b(thinking\s*level|thinking\s*effort|reasoning|思考深度|推理程度|思考模式)\b/i.test(desc) &&
         !matchesThinkingTier(item, 'high') &&
-        !matchesThinkingTier(item, 'low')
+        !matchesThinkingTier(item, 'low') &&
+        !matchesThinkingTier(item, 'medium')
       ) {
-        return {
-          element: item,
-          isSubmenuTrigger: true,
-          label: (item.innerText || '').replace(/\s+/g, ' ').trim(),
-        };
+        if (
+          /^(thinking|reasoning|思考|深度思考|推理|思考模式|思考程度|思考预算)$/i.test(clean) ||
+          /\b(thinking|reasoning)\b/i.test(desc) ||
+          /(思考|推理)/.test(desc)
+        ) {
+          if (!/\b(flash|lite|argon|pro)\b/i.test(clean)) {
+            return {
+              element: item,
+              isSubmenuTrigger: true,
+              label: clean || 'Thinking',
+            };
+          }
+        }
       }
     }
 
@@ -1000,19 +1076,31 @@
     let finalModelLabel = preferredModel;
     let thinkingLocked = false;
 
-    // 阶段 A：检查并锁定目标模型 (Argon)
-    const switcherBtn = findModelSwitcherButton();
+    // 检查初始状态
+    let switcherBtn = findModelSwitcherButton();
     if (switcherBtn) {
-      const currentBtnDesc = getElementDescriptor(switcherBtn);
-      const currentBtnText = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim();
-      const isModelAlreadyTarget = currentBtnDesc.toLowerCase().includes(targetModelKeywords[0]);
+      const initialDesc = getElementDescriptor(switcherBtn);
+      const isModelAlreadyArgon = initialDesc.toLowerCase().includes(targetModelKeywords[0]);
+      const isAlreadyTargetThinking = isDescriptorAlreadyAtTier(initialDesc, targetTier);
 
-      if (!isModelAlreadyTarget) {
+      // 如果模型已经是 Argon 且思考深度已经是 High（例如按钮已明确显示 "Argon 高"），直接确认并跳过，零延迟零弹窗！
+      if (isModelAlreadyArgon && isAlreadyTargetThinking) {
+        thinkingLocked = true;
+        finalModelLabel = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim() || preferredModel;
+        reportStatus('双锁预检通过', `当前模型与思考深度已处于最高档位: [${finalModelLabel}]`);
+        return {
+          model: finalModelLabel,
+          thinkingLevel: targetTier,
+          thinkingLocked: true,
+        };
+      }
+
+      // 阶段 1：若当前模型不是 Argon（如 Flash-Lite 或 Flash），先切为 Argon
+      if (!isModelAlreadyArgon) {
         reportStatus(
-          `检测到当前模型为 [${currentBtnText || 'Flash'}]`,
-          `正在切换模型至 ${preferredModel} 并准备锁定 ${targetTier.toUpperCase()} 推理深度...`
+          `正在切换模型 -> ${preferredModel}`,
+          `当前为 [${(switcherBtn.innerText || 'Flash').trim()}]，打开菜单选择 ${preferredModel}...`
         );
-
         simulateRealClick(switcherBtn);
 
         let modelOpt = null;
@@ -1023,15 +1111,6 @@
           if (modelOpt) break;
         }
 
-        const inlineThinkingPre = findThinkingTierOptionInOverlay(targetTier);
-        if (inlineThinkingPre && !inlineThinkingPre.isSubmenuTrigger) {
-          if (!inlineThinkingPre.alreadySelected) {
-            simulateRealClick(inlineThinkingPre.element);
-            await sleep(220);
-          }
-          thinkingLocked = true;
-        }
-
         if (modelOpt) {
           if (modelOpt.quotaExhausted) {
             await closeActiveOverlays();
@@ -1039,115 +1118,118 @@
           }
           if (!modelOpt.alreadySelected) {
             simulateRealClick(modelOpt.element);
-            await sleep(450);
+            await sleep(500);
           }
           finalModelLabel = modelOpt.fullText || preferredModel;
-        } else {
-          await closeActiveOverlays();
         }
-      } else {
-        finalModelLabel = currentBtnText || preferredModel;
+        await closeActiveOverlays();
+        await sleep(350);
       }
     }
 
-    // 阶段 B：探测底部输入栏独立 Thinking Effort 胶囊按钮或内联组
-    const refreshedModelBtn = findModelSwitcherButton();
-    if (refreshedModelBtn) {
-      const txt = (refreshedModelBtn.innerText || '').replace(/\s+/g, ' ').trim();
-      if (txt) finalModelLabel = txt;
-    }
-
-    const standaloneCtrl = findStandaloneThinkingButton(refreshedModelBtn);
-
-    if (standaloneCtrl) {
-      if (standaloneCtrl.type === 'inline-group') {
-        const highBtn = standaloneCtrl.elements.find((el) => matchesThinkingTier(el, targetTier));
-        if (highBtn) {
-          if (!isElementSelected(highBtn)) {
-            reportStatus(
-              `正在调整推理程度 -> ${targetTier.toUpperCase()}`,
-              '点击输入栏内联 High 思考档位...'
-            );
-            simulateRealClick(highBtn);
-            await sleep(300);
-          }
-          thinkingLocked = true;
-        }
-      } else if (standaloneCtrl.type === 'dropdown-button') {
-        const chipEl = standaloneCtrl.element;
-        const chipDesc = getElementDescriptor(chipEl);
-
-        if (isDescriptorAlreadyAtTier(chipDesc, targetTier)) {
-          thinkingLocked = true;
-        } else {
-          reportStatus(
-            `检测到思考深度为 [${(chipEl.innerText || 'Low').trim()}]`,
-            `正在切换推理程度至 ${targetTier.toUpperCase()} (深度思考)...`
-          );
-
-          simulateRealClick(chipEl);
-
-          let tierOpt = null;
-          const waitStart = Date.now();
-          while (Date.now() - waitStart < 2200) {
-            await sleep(100);
-            tierOpt = findThinkingTierOptionInOverlay(targetTier);
-            if (tierOpt) break;
-          }
-
-          if (tierOpt && tierOpt.isSubmenuTrigger) {
-            simulateRealClick(tierOpt.element);
-            await sleep(300);
-            tierOpt = findThinkingTierOptionInOverlay(targetTier);
-          }
-
-          if (tierOpt && !tierOpt.isSubmenuTrigger) {
-            if (!tierOpt.alreadySelected) {
-              simulateRealClick(tierOpt.element);
-              await sleep(350);
-            }
-            thinkingLocked = true;
-          }
-          await closeActiveOverlays();
-        }
-      }
-    }
-
-    // 阶段 C：若未锁定，复查模型菜单内的内嵌 Thinking 切换器
-    if (!thinkingLocked && refreshedModelBtn) {
-      const modelBtnDesc = getElementDescriptor(refreshedModelBtn);
-      if (isDescriptorAlreadyAtTier(modelBtnDesc, targetTier)) {
+    // 阶段 2：强制锁定思考深度为目标档位 (HIGH / 高)
+    switcherBtn = findModelSwitcherButton();
+    if (switcherBtn) {
+      const descNow = getElementDescriptor(switcherBtn);
+      if (isDescriptorAlreadyAtTier(descNow, targetTier)) {
         thinkingLocked = true;
+        finalModelLabel = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim() || finalModelLabel;
       } else {
-        simulateRealClick(refreshedModelBtn);
+        reportStatus(
+          `锁定思考深度 -> ${targetTier.toUpperCase()}`,
+          `当前状态 [${(switcherBtn.innerText || '').trim()}] 未呈现高思考，正在打开菜单配置...`
+        );
+
+        // 打开模型/思考菜单
+        simulateRealClick(switcherBtn);
 
         let tierOpt = null;
         const waitStart = Date.now();
-        while (Date.now() - waitStart < 2200) {
+        while (Date.now() - waitStart < 2500) {
           await sleep(100);
           tierOpt = findThinkingTierOptionInOverlay(targetTier);
           if (tierOpt) break;
         }
 
+        // 如果发现子菜单触发器（比如“思考”或“Thinking”），模拟展开
         if (tierOpt && tierOpt.isSubmenuTrigger) {
+          reportStatus('展开思考设置', `在菜单中展开 [${tierOpt.label}]...`);
+          simulateHover(tierOpt.element);
           simulateRealClick(tierOpt.element);
-          await sleep(300);
+          await sleep(350);
           tierOpt = findThinkingTierOptionInOverlay(targetTier);
         }
 
         if (tierOpt && !tierOpt.isSubmenuTrigger) {
           if (!tierOpt.alreadySelected) {
             reportStatus(
-              `正在锁定推理程度 -> ${targetTier.toUpperCase()}`,
-              `在模型菜单内切换至 ${tierOpt.label}...`
+              `选中推理档位 -> ${targetTier.toUpperCase()}`,
+              `点击档位选项: [${tierOpt.label}]...`
             );
             simulateRealClick(tierOpt.element);
-            await sleep(350);
+            await sleep(400);
           }
           thinkingLocked = true;
         }
 
         await closeActiveOverlays();
+        await sleep(350);
+
+        // 最终校验：再次确认模型按钮文本
+        const finalBtn = findModelSwitcherButton();
+        if (finalBtn) {
+          const finalDesc = getElementDescriptor(finalBtn);
+          if (isDescriptorAlreadyAtTier(finalDesc, targetTier)) {
+            thinkingLocked = true;
+            finalModelLabel = (finalBtn.innerText || '').replace(/\s+/g, ' ').trim();
+          }
+        }
+      }
+    }
+
+    // 阶段 3：独立输入栏控件探测（如果有独立的 Thinking 药丸/单选组）
+    if (!thinkingLocked) {
+      const standaloneCtrl = findStandaloneThinkingButton(switcherBtn);
+      if (standaloneCtrl) {
+        if (standaloneCtrl.type === 'inline-group') {
+          const highBtn = standaloneCtrl.elements.find((el) => matchesThinkingTier(el, targetTier));
+          if (highBtn) {
+            if (!isElementSelected(highBtn)) {
+              simulateRealClick(highBtn);
+              await sleep(300);
+            }
+            thinkingLocked = true;
+          }
+        } else if (standaloneCtrl.type === 'dropdown-button') {
+          const chipEl = standaloneCtrl.element;
+          const chipDesc = getElementDescriptor(chipEl);
+          if (isDescriptorAlreadyAtTier(chipDesc, targetTier)) {
+            thinkingLocked = true;
+          } else {
+            simulateRealClick(chipEl);
+            let tierOpt = null;
+            const waitStart = Date.now();
+            while (Date.now() - waitStart < 2200) {
+              await sleep(100);
+              tierOpt = findThinkingTierOptionInOverlay(targetTier);
+              if (tierOpt) break;
+            }
+            if (tierOpt && tierOpt.isSubmenuTrigger) {
+              simulateHover(tierOpt.element);
+              simulateRealClick(tierOpt.element);
+              await sleep(300);
+              tierOpt = findThinkingTierOptionInOverlay(targetTier);
+            }
+            if (tierOpt && !tierOpt.isSubmenuTrigger) {
+              if (!tierOpt.alreadySelected) {
+                simulateRealClick(tierOpt.element);
+                await sleep(350);
+              }
+              thinkingLocked = true;
+            }
+            await closeActiveOverlays();
+          }
+        }
       }
     }
 
@@ -1159,10 +1241,10 @@
     }
 
     reportStatus(
-      `双锁就绪: ${finalModelLabel} · Thinking=${targetTier.toUpperCase()}`,
+      `双锁就绪: ${finalModelLabel} · Thinking=${thinkingLocked ? targetTier.toUpperCase() : 'DEFAULT'}`,
       thinkingLocked
         ? `已确认开启 ${targetTier.toUpperCase()} 深度思考模式`
-        : `模型已锁定 (${finalModelLabel})`
+        : `⚠️ 提示: 未能在界面锁定高思考开关，将以当前档位 (${finalModelLabel}) 发送`
     );
 
     return {
@@ -1717,12 +1799,13 @@
       const lockResult = await ensureTargetModelAndThinking(targetModel, targetThinking);
 
       const activeCid = getCurrentChatIdFromUrl();
-      const badgeLabel = `${projectName} · ${targetThinking.toUpperCase()} · ${
+      const thinkingStatusTag = lockResult.thinkingLocked ? targetThinking.toUpperCase() : 'NORMAL';
+      const badgeLabel = `${projectName} · ${thinkingStatusTag} · ${
         activeCid ? '#' + activeCid.slice(0, 6) : 'NEW'
       }`;
 
       reportStatus(
-        `正在向 [${projectName}] 专属会话提问 (${lockResult.model} / ${targetThinking.toUpperCase()})...`,
+        `正在向 [${projectName}] 专属会话提问 (${lockResult.model} / ${thinkingStatusTag})...`,
         `Req: ${task.requestId.slice(0, 8)}`,
         badgeLabel
       );
@@ -1782,7 +1865,7 @@
         ? `https://gemini.google.com/app/${finalChatId}`
         : window.location.href;
 
-      const finalBadge = `${projectName} · ${targetThinking.toUpperCase()} · ${
+      const finalBadge = `${projectName} · ${thinkingStatusTag} · ${
         finalChatId ? '#' + finalChatId.slice(0, 6) : 'BOUND'
       }`;
 
@@ -1794,7 +1877,7 @@
         chatId: finalChatId,
         chatUrl: finalChatUrl,
         model: lockResult.model,
-        thinkingLevel: lockResult.thinkingLevel,
+        thinkingLevel: thinkingStatusTag,
         markdown,
         source,
         timestamp: Date.now(),
@@ -1803,7 +1886,7 @@
       updateHud(
         'CONNECTED',
         `Argon Bridge: [${projectName}] 已完成`,
-        `已回传 ${markdown.length} 字符 (${source} · ${targetThinking.toUpperCase()})`,
+        `已回传 ${markdown.length} 字符 (${source} · ${thinkingStatusTag})`,
         finalBadge
       );
     } catch (err) {

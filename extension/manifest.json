@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.3.3 (Active Anti-Overload & Zombie Watchdog)",
-  "version": "2.3.3",
-  "description": "Argon Bridge v2.3.3: Active anti-overload watchdog, pre-send zombie stop clearing, one-click session rotate, and passive quota cooling",
+  "name": "Argon Bridge v2.3.4 (Precision High-Thinking Dual-Lock)",
+  "version": "2.3.4",
+  "description": "Argon Bridge v2.3.4: Precision High-Thinking dual-lock, active anti-overload watchdog, pre-send zombie cleanup, and one-click session rotate",
   "permissions": [
     "tabs",
     "scripting",
