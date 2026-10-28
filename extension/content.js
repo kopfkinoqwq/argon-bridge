@@ -212,7 +212,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.4</span>
+            <span class="version-badge">v2.3.5</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -1349,45 +1349,59 @@
       await sleep(250);
     }
 
-    // 强效发送循环：尝试多层点击并严格校验是否成功发出
+    // 稳健单通道发送机制（防连击、防多发）：
     let sendSucceeded = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       sendBtn = findSendButton();
+
+      // 关键原则：优先点击发送按钮；若无有效按钮才使用 Enter 键，绝不同时并发触发两者！
       if (sendBtn) {
         simulateRealClick(sendBtn);
-        try { sendBtn.click(); } catch (_) {}
-        const childTarget = sendBtn.querySelector('mat-icon, svg, span');
-        if (childTarget) {
-          try { childTarget.click(); } catch (_) {}
+      } else {
+        inputEl.focus();
+        inputEl.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            which: 13,
+            bubbles: true,
+          })
+        );
+      }
+
+      // 发送后给予充足时间（至多 3.5 秒）等待 Google 渲染响应，严禁以 700ms 狂暴重试导致重复多发
+      const waitSubmitStart = Date.now();
+      while (Date.now() - waitSubmitStart < 3500) {
+        await sleep(250);
+        const currentInputText = (inputEl.innerText || '').trim();
+        const queriesNow = getUserQueryElements().length;
+        const stopVisible = isStopButtonVisible();
+        const sendBtnNow = findSendButton();
+
+        // 成功依据（满足任一即代表请求已进入 Google 队列）：
+        // 1. 出现停止生成按钮
+        // 2. 提问气泡数量已增加
+        // 3. 输入框已被清空
+        // 4. 发送按钮已消失或被禁用（Google 开始流式传输）
+        if (
+          stopVisible ||
+          queriesNow > queryCountBefore ||
+          !currentInputText ||
+          !sendBtnNow
+        ) {
+          sendSucceeded = true;
+          break;
         }
       }
 
-      inputEl.focus();
-      inputEl.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          code: 'Enter',
-          keyCode: 13,
-          which: 13,
-          bubbles: true,
-        })
-      );
-
-      await sleep(700);
-
-      const currentInputText = (inputEl.innerText || '').trim();
-      const queriesNow = getUserQueryElements().length;
-      const stopVisible = isStopButtonVisible();
-
-      // 验证依据：输入框已清空、或者已出现新用户提问气泡、或者已出现 Stop 生成按钮
-      if (!currentInputText || queriesNow > queryCountBefore || stopVisible) {
-        sendSucceeded = true;
+      if (sendSucceeded) {
         break;
       }
 
-      // 未发出则补充派发 input 事件激活按钮
+      // 未发出则补充派发 input 事件激活按钮，等待 500ms 后才尝试最后一次重试
       inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      await sleep(300);
+      await sleep(500);
     }
 
     if (!sendSucceeded) {
