@@ -1349,63 +1349,60 @@
       await sleep(250);
     }
 
-    // 稳健单通道发送机制（防连击、防多发）：
-    let sendSucceeded = false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      sendBtn = findSendButton();
-
-      // 关键原则：优先点击发送按钮；若无有效按钮才使用 Enter 键，绝不同时并发触发两者！
-      if (sendBtn) {
-        simulateRealClick(sendBtn);
-      } else {
-        inputEl.focus();
-        inputEl.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'Enter',
-            code: 'Enter',
-            keyCode: 13,
-            which: 13,
-            bubbles: true,
-          })
-        );
-      }
-
-      // 发送后给予充足时间（至多 3.5 秒）等待 Google 渲染响应，严禁以 700ms 狂暴重试导致重复多发
-      const waitSubmitStart = Date.now();
-      while (Date.now() - waitSubmitStart < 3500) {
-        await sleep(250);
-        const currentInputText = (inputEl.innerText || '').trim();
-        const queriesNow = getUserQueryElements().length;
-        const stopVisible = isStopButtonVisible();
-        const sendBtnNow = findSendButton();
-
-        // 成功依据（满足任一即代表请求已进入 Google 队列）：
-        // 1. 出现停止生成按钮
-        // 2. 提问气泡数量已增加
-        // 3. 输入框已被清空
-        // 4. 发送按钮已消失或被禁用（Google 开始流式传输）
-        if (
-          stopVisible ||
-          queriesNow > queryCountBefore ||
-          !currentInputText ||
-          !sendBtnNow
-        ) {
-          sendSucceeded = true;
-          break;
-        }
-      }
-
-      if (sendSucceeded) {
-        break;
-      }
-
-      // 未发出则补充派发 input 事件激活按钮，等待 500ms 后才尝试最后一次重试
-      inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-      await sleep(500);
+    // 核心安全机制：绝对单次平稳触发（STRICT SINGLE SUBMISSION）
+    // 坚决彻底移除任何并发连击与高频重试循环，杜绝任何多发风险！
+    if (sendBtn) {
+      reportStatus('正在提交提示词', '点击发送按钮（单次精准触发）...');
+      simulateRealClick(sendBtn);
+    } else {
+      reportStatus('正在提交提示词', '通过回车键发送（单次精准触发）...');
+      inputEl.focus();
+      inputEl.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+        })
+      );
     }
 
-    if (!sendSucceeded) {
-      throw new Error('[SEND_FAILED] 提示词未能从网页输入框发送成功，页面发送按钮未响应。');
+    // 提交后耐心等待 Google 接收并进入生成状态（至多等待 8 秒缓冲期）
+    const waitSubmitStart = Date.now();
+    let sendConfirmed = false;
+    while (Date.now() - waitSubmitStart < 8000) {
+      await sleep(300);
+      const currentInputText = (inputEl.innerText || '').trim();
+      const queriesNow = getUserQueryElements().length;
+      const stopVisible = isStopButtonVisible();
+      const sendBtnNow = findSendButton();
+
+      // 判定依据：满足任一即代表请求已被 Google 成功接纳处理
+      if (
+        stopVisible ||
+        queriesNow > queryCountBefore ||
+        !currentInputText ||
+        !sendBtnNow
+      ) {
+        sendConfirmed = true;
+        break;
+      }
+    }
+
+    if (!sendConfirmed) {
+      // 仅在整整 8 秒后界面依然毫无响应时，进行唯一一次单次回车兜底
+      reportStatus('提交确认延迟', '等待超过 8s，尝试单次回车兜底...');
+      inputEl.focus();
+      inputEl.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+        })
+      );
     }
   }
 
@@ -1508,10 +1505,10 @@
 
         // 核心稳定性仲裁 + 防死锁看门狗（Anti-Zombie Watchdog）：
         if (stopVisible) {
-          // 场景 1：已转圈超 45 秒但未产生任何 1 个 Token（Google 官方云端掉线）
-          // 场景 2：流式输出中途突然停滞超 60 秒（服务端异常挂起）
-          const stuckAtStart = currentLength === 0 && (Date.now() - startTime > 45000);
-          const stuckMidStream = currentLength > 0 && (Date.now() - lastProgressTime > 60000);
+          // 场景 1：已转圈超 120 秒但未产生任何 1 个 Token（Google 官方云端掉线）
+          // 场景 2：流式输出中途深度思考或卡顿超 300 秒（支持高深度长文本推理）
+          const stuckAtStart = currentLength === 0 && (Date.now() - startTime > 120000);
+          const stuckMidStream = currentLength > 0 && (Date.now() - lastProgressTime > 300000);
 
           if (stuckAtStart || stuckMidStream) {
             const stopBtn = findStopButton();
@@ -1521,7 +1518,7 @@
             if (currentLength > 200) {
               return targetResponseNode;
             }
-            throw new Error(`[BACKEND_HANG] Google 官方云端流式断流死锁（转圈超 ${stuckAtStart ? '45s 无首字' : '60s 无输出'}）。已自动点击停止按钮解除卡死。`);
+            throw new Error(`[BACKEND_HANG] Google 官方云端流式断流死锁（转圈超 ${stuckAtStart ? '120s 无首字' : '300s 无输出'}）。已自动点击停止按钮解除卡死。`);
           }
           continue;
         }
