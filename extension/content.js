@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v3.0.0 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v3.0.1 - Content Script for https://gemini.google.com/*
  * Full-Duplex Autonomous Agent Bus, Zero-Touch Clipboard, O(1) Watchdog & Entropy Guard
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
@@ -168,7 +168,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v3.0.0</span>
+            <span class="version-badge">v3.0.1</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -756,55 +756,60 @@
       .trim()
       .toLowerCase();
 
-    // 过滤掉整个模型名长文本（防止误伤含有该词汇的模型选项本身）
-    if (/\b(flash-lite|3\.8\s*flash|3\.5\s*flash|gemini\s*4\s*argon|gemini\s*3)\b/i.test(cleanText) && cleanText.length > 25) {
+    // 严苛过滤：任何属于主模型选择项的元素绝对不属于思考档位！
+    if (
+      /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(cleanText) ||
+      /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(ariaText) ||
+      /极速回答|全方位帮助|高级推理|复杂任务/i.test(cleanText) ||
+      /极速回答|全方位帮助|高级推理|复杂任务/i.test(rawText)
+    ) {
       return false;
     }
 
     if (tierKey === 'high') {
+      // 必须绝对排除低档与中档
       if (/^(low|medium|minimal|off|低|中|关闭)\b/i.test(cleanText)) return false;
+      if (cleanText.includes('低') || cleanText.includes('中') || cleanText.includes('快速高效') || cleanText.includes('深度适中')) {
+        return false;
+      }
       if (
         cleanText === '高' ||
         cleanText === 'high' ||
-        cleanText === '深度思考' ||
-        cleanText === '深度推理' ||
-        cleanText === '高思考' ||
-        cleanText === '高推理' ||
-        cleanText === 'maximum' ||
-        /^(高|深度|深度思考|深度推理|最大|最高)(\s|$|（|\()/i.test(cleanText) ||
-        /\b(high|maximum|extra\s*thorough)\b/i.test(cleanText) ||
-        /\b(high)\b/i.test(ariaText) ||
-        /(思考|推理|thinking|effort|level).*?(high|高|深度|最大)/i.test(`${cleanText} ${ariaText}`) ||
-        /(high|高|深度|最大).*?(思考|推理|thinking|effort|level)/i.test(`${cleanText} ${ariaText}`) ||
-        (/高/.test(cleanText) && cleanText.length <= 10 && !/[低中]/.test(cleanText))
+        cleanText.includes('超级详尽') ||
+        cleanText.includes('extra thorough') ||
+        cleanText.includes('深度思考') ||
+        cleanText.includes('maximum') ||
+        /^(高|high)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
+        /\bhigh\b/i.test(ariaText) ||
+        /^(高|high)$/i.test(ariaText)
       ) {
         return true;
       }
     } else if (tierKey === 'low') {
+      if (cleanText.includes('高') || cleanText.includes('中') || cleanText.includes('超级详尽') || cleanText.includes('深度适中')) {
+        return false;
+      }
       if (
         cleanText === '低' ||
         cleanText === 'low' ||
-        cleanText === '轻量' ||
-        cleanText === '快速' ||
-        cleanText === 'minimal' ||
-        /^(低|轻量|快速|浅度)(\s|$|（|\()/i.test(cleanText) ||
-        /\b(low|minimal|fast|quick)\b/i.test(cleanText) ||
-        /\b(low|minimal)\b/i.test(ariaText) ||
-        (/低/.test(cleanText) && cleanText.length <= 10 && !/[高中]/.test(cleanText))
+        cleanText.includes('快速高效') ||
+        cleanText.includes('minimal') ||
+        /^(低|low)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
+        /\b(low|minimal)\b/i.test(ariaText)
       ) {
         return true;
       }
     } else if (tierKey === 'medium') {
+      if (cleanText.includes('高') || cleanText.includes('低') || cleanText.includes('超级详尽') || cleanText.includes('快速高效')) {
+        return false;
+      }
       if (
         cleanText === '中' ||
         cleanText === 'medium' ||
-        cleanText === '中等' ||
-        cleanText === '标准' ||
-        cleanText === '均衡' ||
-        /^(中|中等|标准|均衡)(\s|$|（|\()/i.test(cleanText) ||
-        /\b(medium|balanced|standard)\b/i.test(cleanText) ||
-        /\b(medium)\b/i.test(ariaText) ||
-        (/中/.test(cleanText) && cleanText.length <= 10 && !/[高低]/.test(cleanText))
+        cleanText.includes('深度适中') ||
+        cleanText.includes('balanced') ||
+        /^(中|medium)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
+        /\bmedium\b/i.test(ariaText)
       ) {
         return true;
       }
@@ -815,7 +820,10 @@
 
   function isDescriptorAlreadyAtTier(descText, targetTier = 'high') {
     if (!descText) return false;
-    const norm = descText.replace(/\s+/g, ' ').trim().toLowerCase();
+    let norm = descText.replace(/\s+/g, ' ').trim().toLowerCase();
+
+    // 剔除模型本身的描述，例如 "3.1 Pro 高级推理" 包含 "高级推理"，不能让其将思考判定为 High
+    norm = norm.replace(/高级推理/g, '').replace(/复杂任务/g, '');
 
     if (targetTier === 'high') {
       // 若包含 low / 低 / 中，绝不是 High
@@ -824,7 +832,7 @@
       }
       if (
         /\b(high|maximum|deep)\b/i.test(norm) ||
-        /(高|深度思考|深度推理|深度|最高|最大)/.test(norm)
+        /(高|深度思考|深度推理|深度|最高|最大|超级详尽)/.test(norm)
       ) {
         return true;
       }
@@ -833,7 +841,7 @@
       if (/(\b(high|medium)\b|[:：\s](高|中)(?:$|\s|\)))/i.test(norm)) {
         return false;
       }
-      return /\b(low|minimal|fast)\b/i.test(norm) || /(低|轻量|快速|浅度)/.test(norm);
+      return /\b(low|minimal|fast)\b/i.test(norm) || /(低|轻量|快速|浅度|快速高效)/.test(norm);
     }
     return false;
   }
@@ -999,10 +1007,18 @@
       }
     }
 
-    // 2. 若未直接出现档位，寻找“思考”/“推理”或 Argon 模型的二级子菜单触发器
+    // 2. 若未直接出现档位，寻找“思考等级”二级子菜单触发项
     for (const item of candidates) {
       const clean = getCleanElementText(item).toLowerCase();
       const desc = getElementDescriptor(item).toLowerCase();
+
+      // 绝对过滤掉所有模型项（严防 3.1 Pro、4 Argon、3.8 Flash 等副标题干扰）
+      const isModelOption =
+        /\b(flash|lite|pro|argon|ultra|gemini|\d\.\d)\b/i.test(clean) ||
+        /\b(flash|lite|pro|argon|ultra|gemini|\d\.\d)\b/i.test(desc) ||
+        /极速回答|全方位帮助|高级推理|复杂任务/i.test(desc);
+      if (isModelOption) continue;
+
       if (
         !matchesThinkingTier(item, 'high') &&
         !matchesThinkingTier(item, 'low') &&
@@ -1020,21 +1036,17 @@
           return /chevron_right|arrow_right|arrow_drop_down|expand_more|navigate_next/.test(iconName);
         });
 
-        // 思考设置触发项
+        // 精准瞄准思考等级触发项（专指菜单底部的 "思考等级 >"）
         const isThinkingTrigger =
-          /^(thinking|reasoning|思考|深度思考|推理|思考模式|思考程度|思考预算)$/i.test(clean) ||
-          /\b(thinking|reasoning)\b/i.test(desc) ||
-          /(思考|推理)/.test(desc);
+          /(思考等级|思考模式|思考程度|思考预算|思考设置|推理等级|推理程度|thinking\s*level|thinking\s*tier|reasoning\s*level|reasoning\s*depth)/i.test(clean) ||
+          /(思考等级|思考模式|思考程度|思考预算|思考设置|推理等级|推理程度|thinking\s*level|thinking\s*tier|reasoning\s*level|reasoning\s*depth)/i.test(desc) ||
+          (/^思考\s*(>|等级|设置)?$/i.test(clean) && (hasSubmenuAttr || hasChevronIcon));
 
-        // Argon 选项自身的二级菜单展开项（如 "Gemini 4 Argon >"）
-        const isArgonSubmenu =
-          /\b(argon|pro)\b/i.test(clean) && (hasSubmenuAttr || hasChevronIcon);
-
-        if (isThinkingTrigger || isArgonSubmenu) {
+        if (isThinkingTrigger) {
           return {
             element: item,
             isSubmenuTrigger: true,
-            label: clean || 'Thinking/Argon Submenu',
+            label: clean || '思考等级',
           };
         }
       }
@@ -1131,14 +1143,18 @@
           if (tierOpt) break;
         }
 
-        // 如果发现子菜单触发器（比如“思考”或“Thinking”或 Argon 的二级菜单），模拟展开并轮询捕获子项
+        // 如果发现子菜单触发器（比如“思考等级”），模拟展开并轮询捕获子项
         if (tierOpt && tierOpt.isSubmenuTrigger) {
           reportStatus('展开思考设置', `在菜单中展开 [${tierOpt.label}]...`);
+          try {
+            tierOpt.element.focus();
+          } catch (_) {}
           simulateHover(tierOpt.element);
+          await sleep(150);
           simulateRealClick(tierOpt.element);
-          
+
           const subWaitStart = Date.now();
-          while (Date.now() - subWaitStart < 2000) {
+          while (Date.now() - subWaitStart < 3000) {
             await sleep(100);
             const foundTier = findThinkingTierOptionInOverlay(targetTier);
             if (foundTier && !foundTier.isSubmenuTrigger) {
@@ -1203,10 +1219,14 @@
               if (tierOpt) break;
             }
             if (tierOpt && tierOpt.isSubmenuTrigger) {
+              try {
+                tierOpt.element.focus();
+              } catch (_) {}
               simulateHover(tierOpt.element);
+              await sleep(150);
               simulateRealClick(tierOpt.element);
               const subWaitStart = Date.now();
-              while (Date.now() - subWaitStart < 2000) {
+              while (Date.now() - subWaitStart < 3000) {
                 await sleep(100);
                 const foundTier = findThinkingTierOptionInOverlay(targetTier);
                 if (foundTier && !foundTier.isSubmenuTrigger) {
