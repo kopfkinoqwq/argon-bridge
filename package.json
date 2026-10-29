@@ -4,7 +4,8 @@
   "description": "Zero-bloat WebSocket bridge with Model & High-Thinking lock, Zero-Reflow streaming, and 1:1 Project-to-Chat session mapping for Web Gemini 4 Argon",
   "main": "ask_argon.js",
   "bin": {
-    "ask-argon": "./ask_argon.js"
+    "ask-argon": "./ask_argon.js",
+    "ask_argon": "./ask_argon.js"
   },
   "scripts": {
     "ask": "node ask_argon.js",
