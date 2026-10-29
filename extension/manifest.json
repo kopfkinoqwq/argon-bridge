@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.4.0 (Zero-Touch Clipboard & Tail Watchdog)",
-  "version": "2.4.0",
-  "description": "Argon Bridge v2.4.0: MAIN World zero-touch clipboard interception, O(1) tail-scoped watchdog, and daemon multiplexer",
+  "name": "Argon Bridge v3.0.0 (Full-Duplex Dual-Brain & Entropy Guard)",
+  "version": "3.0.0",
+  "description": "Argon Bridge v3.0.0: Full-duplex reverse tool-calling, rolling handover entropy guard, zero-touch clipboard, and O(1) watchdog",
   "permissions": [
     "tabs",
     "scripting",

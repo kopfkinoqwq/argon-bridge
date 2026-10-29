@@ -1,6 +1,6 @@
 /**
- * Argon Bridge v2.4.0 - Content Script for https://gemini.google.com/*
- * Zero-Touch Clipboard Interception, O(1) Tail-Scoped Watchdog & Three-Lock State Machine
+ * Argon Bridge v3.0.0 - Content Script for https://gemini.google.com/*
+ * Full-Duplex Autonomous Agent Bus, Zero-Touch Clipboard, O(1) Watchdog & Entropy Guard
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
  * 2. Automatic waiting for rich-textarea readiness after session switching
@@ -168,7 +168,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.4.0</span>
+            <span class="version-badge">v3.0.0</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -2026,6 +2026,11 @@
           // 判定是否存在服务端静默软降级：若要求 High 深度思考，但无 CoT 块且首包极快 (<1500ms)
           if (!telemetry.hasCoTBlock && telemetry.firstContentTokenAt && telemetry.firstContentTokenAt < 1500) {
             telemetry.suspectedSoftDowngrade = true;
+          }
+          try {
+            telemetry.domNodes = document.getElementsByTagName('*').length;
+          } catch (_) {
+            telemetry.domNodes = 0;
           }
           return { status: 'COMPLETED', telemetry };
         }

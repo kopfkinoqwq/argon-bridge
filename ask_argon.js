@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * argon-bridge v2.4.0: Single-File Dual-Role Architecture
+ * argon-bridge v3.0.0: Full-Duplex Autonomous Agent Bus & Entropy Guard
  * Role A: Background Daemon Multiplexer (Port 17420, MV3 SW Keep-Alive, FIFO Queue)
- * Role B: Thin CLI Client (Self-Bootstrapping, Zero Port Collision, Multi-Terminal Safe)
+ * Role B: Thin CLI Client (Self-Bootstrapping, Reverse Tool-Calling, Watermark Rolling)
  */
 
 'use strict';
@@ -14,6 +14,19 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { WebSocketServer, WebSocket } = require('ws');
+
+const {
+  MAX_PROBE_ROUNDS,
+  parseReverseProbeDirective,
+  buildProbeResponsePrompt,
+} = require('./reverse_probe');
+
+const {
+  checkWatermarks,
+  buildDistillationPrompt,
+  buildBootstrapPrompt,
+  saveSeedSnapshot,
+} = require('./entropy_guard');
 
 const DEFAULT_PORT = 17420;
 const HOST = '127.0.0.1';
@@ -64,7 +77,7 @@ function atomicWriteJson(filePath, dataObj) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const tmpFile = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmpFile, JSON.stringify(dataObj, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmpFile, filePath); // POSIX/NTFS 原子替换，杜绝并发写坏
+  fs.renameSync(tmpFile, filePath);
 }
 
 function loadGlobalRegistry() {
@@ -133,23 +146,42 @@ function detectProjectContext(options = {}) {
     chatId,
     chatUrl: buildChatUrl(chatId),
     isNewChat: Boolean(options.newChat || !chatId),
+    metrics: localConfig?.metrics || { turnCount: 0, cumulativeChars: 0 },
   };
 }
 
-function persistProjectSession(ctx, chatId, chatUrl) {
+function persistProjectSession(ctx, chatId, chatUrl, extraMetrics = {}) {
   const cleanId = normalizeChatId(chatId) || normalizeChatId(chatUrl);
   if (!cleanId) return null;
 
   const finalUrl = buildChatUrl(cleanId);
   const nowIso = new Date().toISOString();
 
+  let existing = {};
+  if (fs.existsSync(ctx.localConfigPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(ctx.localConfigPath, 'utf8'));
+    } catch (_) {}
+  }
+
+  const currentMetrics = existing.metrics || { turnCount: 0, cumulativeChars: 0 };
+  const updatedMetrics = {
+    turnCount: (currentMetrics.turnCount || 0) + (extraMetrics.addTurn ? 1 : 0),
+    cumulativeChars: (currentMetrics.cumulativeChars || 0) + (extraMetrics.addChars || 0),
+    lastDomNodes: extraMetrics.domNodes || currentMetrics.lastDomNodes || 0,
+    lastUpdated: nowIso,
+  };
+
   const record = {
+    schemaVersion: '3.0.0',
     projectKey: ctx.projectKey,
     projectName: ctx.projectName,
     projectPath: ctx.workDir,
     chatId: cleanId,
     chatUrl: finalUrl,
     updatedAt: nowIso,
+    metrics: updatedMetrics,
+    sessionLineage: existing.sessionLineage || [],
   };
 
   try {
@@ -174,10 +206,12 @@ function printSessionList() {
   }
   process.stderr.write('\n\x1b[1m=== Argon Bridge 已绑定项目专属会话列表 (1:1 Mapping) ===\x1b[0m\n');
   for (const item of entries) {
+    const metrics = item.metrics || {};
     process.stderr.write(
       `- \x1b[32m${item.projectName}\x1b[0m (${item.projectKey})\n` +
         `  目录: ${item.projectPath}\n` +
         `  会话: ${item.chatUrl} (chatId: ${item.chatId})\n` +
+        `  轮次: ${metrics.turnCount || 0} 轮 | 字符: ${metrics.cumulativeChars || 0} | DOM: ${metrics.lastDomNodes || 0}\n` +
         `  更新: ${item.updatedAt}\n`
     );
   }
@@ -189,8 +223,8 @@ function printSessionList() {
 // ============================================================================
 function startDaemonServer(port = DEFAULT_PORT) {
   let activeExtensionWs = null;
-  const pendingRpcMap = new Map(); // reqId -> { resolve, reject, timer, payload }
-  const executionQueue = [];       // 全局串行执行队列 (FIFO)
+  const pendingRpcMap = new Map();
+  const executionQueue = [];
   let isProcessingQueue = false;
   let idleTimer = null;
 
@@ -219,7 +253,11 @@ function startDaemonServer(port = DEFAULT_PORT) {
             workDir: job.payload.projectPath,
             localConfigPath: path.join(job.payload.projectPath, LOCAL_CONFIG_FILENAME),
           };
-          persistProjectSession(ctx, result.chatId, result.chatUrl);
+          persistProjectSession(ctx, result.chatId, result.chatUrl, {
+            addTurn: true,
+            addChars: (result.markdown || '').length,
+            domNodes: result.telemetry?.domNodes || 0,
+          });
         }
         job.resolve(result);
       } catch (err) {
@@ -317,7 +355,6 @@ function startDaemonServer(port = DEFAULT_PORT) {
   wss.on('connection', (ws) => {
     activeExtensionWs = ws;
 
-    // 核心心跳：每 20 秒发送心跳帧，彻底阻断 Chrome MV3 Service Worker 的 30 秒空闲挂起！
     const keepAliveInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
@@ -379,7 +416,7 @@ function startDaemonServer(port = DEFAULT_PORT) {
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      process.exit(0); // 端口冲突静默退出
+      process.exit(0);
     }
     process.exit(1);
   });
@@ -390,7 +427,7 @@ function startDaemonServer(port = DEFAULT_PORT) {
 }
 
 // ============================================================================
-// 角色 B：薄客户端 CLI (自举提拔 Daemon，发送请求并收集结果)
+// 角色 B：薄客户端 CLI (全双工自治循环与长会话熵减监控)
 // ============================================================================
 function checkDaemonHealth(port = DEFAULT_PORT) {
   return new Promise((resolve) => {
@@ -419,7 +456,6 @@ async function ensureDaemonRunning(port = DEFAULT_PORT) {
   let health = await checkDaemonHealth(port);
   if (health) return health;
 
-  // 未运行守护进程：自动派生后台解耦进程
   const child = spawn(process.execPath, [__filename, DAEMON_FLAG, '--port', String(port)], {
     detached: true,
     stdio: 'ignore',
@@ -434,6 +470,47 @@ async function ensureDaemonRunning(port = DEFAULT_PORT) {
   }
 
   throw new Error(`无法在端口 ${port} 拉起 argon-bridge 守护进程`);
+}
+
+function sendRpcToDaemon(port, payloadObj, timeoutMs) {
+  const payloadStr = JSON.stringify(payloadObj);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: HOST,
+        port,
+        path: '/api/ask',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payloadStr),
+        },
+        timeout: timeoutMs + 5000,
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch (_) {
+            reject(new Error(`Daemon 响应解析失败: ${raw}`));
+          }
+        });
+      }
+    );
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('CLI 等待 Daemon 调度超时'));
+    });
+
+    req.write(payloadStr);
+    req.end();
+  });
 }
 
 function parseCliArgs(argv) {
@@ -533,7 +610,7 @@ async function runCliClient() {
 
   // 2. 播报双脑协同横幅
   process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
-  process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.4.0)... │\x1b[0m\n`);
+  process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v3.0.0)... │\x1b[0m\n`);
   process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
   logInfo(
     `当前项目: [${projectCtx.projectName}] | 路由模式: ${
@@ -541,74 +618,60 @@ async function runCliClient() {
     }`
   );
 
-  const requestId = crypto.randomUUID();
-  const effectivePrompt = projectCtx.isNewChat
+  let currentPrompt = projectCtx.isNewChat
     ? `[Argon-Bridge Project Session Init | Project: ${projectCtx.projectName} | Path: ${projectCtx.workDir}]\n\n${config.prompt}`
     : config.prompt;
 
-  const payload = JSON.stringify({
-    requestId,
-    projectKey: projectCtx.projectKey,
-    projectName: projectCtx.projectName,
-    projectPath: projectCtx.workDir,
-    chatId: projectCtx.chatId,
-    chatUrl: projectCtx.chatUrl,
-    forceNewChat: projectCtx.isNewChat,
-    model: config.model || 'Argon',
-    thinkingLevel: config.thinkingLevel || 'high',
-    prompt: effectivePrompt,
-    timeoutMs: config.timeoutMs,
-  });
+  let round = 0;
+  let finalResult = null;
 
-  // 3. 向 Daemon 发起 HTTP POST 请求并挂起等待结果
-  const responseData = await new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        hostname: HOST,
-        port: config.port,
-        path: '/api/ask',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        timeout: config.timeoutMs + 5000,
-      },
-      (res) => {
-        let raw = '';
-        res.on('data', (chunk) => {
-          raw += chunk;
-        });
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(raw));
-          } catch (_) {
-            reject(new Error(`Daemon 响应解析失败: ${raw}`));
-          }
-        });
-      }
+  // 3. 全双工自治循环 (Full-Duplex Dialog Loop)：支持 Argon 连续自主发起本地探测 (最多 3 轮)
+  while (round <= MAX_PROBE_ROUNDS) {
+    const requestId = crypto.randomUUID();
+    const payload = {
+      requestId,
+      projectKey: projectCtx.projectKey,
+      projectName: projectCtx.projectName,
+      projectPath: projectCtx.workDir,
+      chatId: projectCtx.chatId,
+      chatUrl: projectCtx.chatUrl,
+      forceNewChat: round === 0 ? projectCtx.isNewChat : false,
+      model: config.model || 'Argon',
+      thinkingLevel: config.thinkingLevel || 'high',
+      prompt: currentPrompt,
+      timeoutMs: config.timeoutMs,
+    };
+
+    const responseData = await sendRpcToDaemon(config.port, payload, config.timeoutMs);
+
+    if (!responseData.ok) {
+      logError(`执行失败: ${responseData.error}`);
+      process.exit(2);
+    }
+
+    finalResult = responseData.data;
+
+    // 检查云端 Argon 是否输出了反向探测指令
+    const probeDirective = parseReverseProbeDirective(finalResult.markdown || '');
+    if (!probeDirective || round >= MAX_PROBE_ROUNDS) {
+      break;
+    }
+
+    round++;
+    const probeSummary = probeDirective.probes
+      .map((p) => `${p.op}(${p.path || p.pattern || p.target || '.'})`)
+      .join(', ');
+    process.stderr.write(
+      `\n\x1b[1;33m[Argon-Probe ${round}/${MAX_PROBE_ROUNDS}]\x1b[0m 🔍 云端首席架构师正在反向探测本地代码: ${probeSummary}\n`
     );
 
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('CLI 等待 Daemon 调度超时'));
-    });
-
-    req.write(payload);
-    req.end();
-  });
-
-  if (!responseData.ok) {
-    logError(`执行失败: ${responseData.error}`);
-    process.exit(2);
+    currentPrompt = buildProbeResponsePrompt(projectCtx.workDir, probeDirective, round);
   }
 
-  const result = responseData.data;
-  const markdown = (result.markdown || '').trim();
-  const source = result.source || 'zero-touch-hook';
-  const modelLabel = result.model || 'Argon';
-  const thinkingLabel = result.thinkingLevel || 'HIGH';
+  const markdown = (finalResult.markdown || '').trim();
+  const source = finalResult.source || 'zero-touch-hook';
+  const modelLabel = finalResult.model || 'Argon';
+  const thinkingLabel = finalResult.thinkingLevel || 'HIGH';
 
   process.stderr.write(`\n\x1b[1;32m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
   process.stderr.write(`\x1b[1;32m│  🏛️ 架构师蓝图已送达：云端 Gemini 4 Argon 输出完毕！          │\x1b[0m\n`);
@@ -619,11 +682,24 @@ async function runCliClient() {
   );
 
   // 4. 服务端静默软降级遥测警告（第三把锁）
-  if (result.telemetry && result.telemetry.suspectedSoftDowngrade) {
-    logWarn('⚠️ [WARN: DEGRADED_SUSPECTED] 未检测到 CoT 思考块且首包过快 (<1.5s)，疑似云端服务端发生静默降级！');
+  if (finalResult.telemetry && finalResult.telemetry.suspectedSoftDowngrade) {
+    logWarn('⚠️ [WARN: DEGRADED_SUSPECTED] 未检测到 CoT 思考块且首包过快 (<1.5s)，警惕云端静默降级！');
   }
 
-  // 5. 若指定了 --out 输出文件，落盘写入
+  // 5. 熵减水位线评估（Entropy-Guard）
+  const watermarkStatus = checkWatermarks({
+    turnCount: projectCtx.metrics?.turnCount || 1,
+    domNodes: finalResult.telemetry?.domNodes || 0,
+    cumulativeChars: (projectCtx.metrics?.cumulativeChars || 0) + markdown.length,
+  });
+
+  if (watermarkStatus.hitSoft) {
+    logWarn(
+      `♻️ [Argon-Entropy-Guard] 当前会话已触达软水位线 (${watermarkStatus.reason})。建议在合适时机使用 --new-chat 触发架构状态交接！`
+    );
+  }
+
+  // 6. 若指定了 --out 输出文件，落盘写入
   if (config.outPath) {
     const baseDir = config.cwd ? path.resolve(config.cwd) : process.cwd();
     const resolvedOut = path.isAbsolute(config.outPath)
@@ -633,7 +709,7 @@ async function runCliClient() {
     logSuccess(`回复已成功写入文件: ${resolvedOut}`);
   }
 
-  // 6. 标准输出纯净 Markdown 供上层工具消费
+  // 7. 标准输出纯净 Markdown 供上层工具消费
   process.stdout.write(markdown + '\n');
 }
 
