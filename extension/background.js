@@ -309,12 +309,29 @@ async function extractLatestResponseFromTab(taskPayload) {
     const results = await chrome.scripting.executeScript({
       target: { tabId: matchedTab.id },
       func: () => {
+        const stopSelectors = [
+          'button[aria-label*="Stop"]',
+          'button[aria-label*="停止"]',
+          'button[aria-label*="Cancel"]',
+          'button mat-icon[data-mat-icon-name="stop_circle"]',
+          '[data-test-id*="stop-button"]',
+          '.stop-button',
+        ];
+        let isGenerating = false;
+        for (const s of stopSelectors) {
+          const btn = document.querySelector(s);
+          if (btn && btn.offsetParent !== null) {
+            isGenerating = true;
+            break;
+          }
+        }
+
         const selectors = [
-          'model-response',
+          '.markdown',
           'message-content',
           '.model-response-text',
           'div[data-message-author-role="model"]',
-          '.markdown',
+          'model-response',
         ];
         let targetNode = null;
         for (const sel of selectors) {
@@ -324,11 +341,12 @@ async function extractLatestResponseFromTab(taskPayload) {
             break;
           }
         }
-        if (!targetNode) return { error: '未找到模型响应内容' };
+        if (!targetNode) return { error: '未找到模型响应内容', isGenerating };
 
         return {
           innerText: (targetNode.innerText || '').trim(),
           url: window.location.href,
+          isGenerating,
         };
       },
     });
@@ -338,12 +356,13 @@ async function extractLatestResponseFromTab(taskPayload) {
       if (res.error) {
         sendToLocalCli({ type: 'ERROR', requestId: taskPayload.requestId, error: res.error });
       } else {
+        const statusPrefix = res.isGenerating ? '> 🧠 [Argon 仍在云端深度思考生成中，尚未完工...]\n\n' : '';
         sendToLocalCli({
           type: 'RESPONSE',
           requestId: taskPayload.requestId,
           chatId: targetChatId || extractChatIdFromUrl(res.url),
           chatUrl: res.url,
-          markdown: res.innerText,
+          markdown: statusPrefix + res.innerText,
           source: 'chrome-scripting-extract',
           timestamp: Date.now(),
         });

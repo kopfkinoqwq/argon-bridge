@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.3.5 (Single-Action Anti-Duplication)",
-  "version": "2.3.5",
-  "description": "Argon Bridge v2.3.5: Single-action anti-duplication submission, precision High-Thinking dual-lock, and active zombie watchdog",
+  "name": "Argon Bridge v2.3.6 (High-Thinking Dual-Lock)",
+  "version": "2.3.6",
+  "description": "Argon Bridge v2.3.6: Single-action anti-duplication submission, precision High-Thinking dual-lock, and active zombie watchdog",
   "permissions": [
     "tabs",
     "scripting",

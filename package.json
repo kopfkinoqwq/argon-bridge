@@ -1,6 +1,6 @@
 {
   "name": "argon-bridge",
-  "version": "2.3.5",
+  "version": "2.3.6",
   "description": "Zero-bloat WebSocket bridge with Model & High-Thinking lock, Zero-Reflow streaming, and 1:1 Project-to-Chat session mapping for Web Gemini 4 Argon",
   "main": "ask_argon.js",
   "bin": {

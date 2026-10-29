@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v2.3.0 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v2.3.6 - Content Script for https://gemini.google.com/*
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
  * 2. Automatic waiting for rich-textarea readiness after session switching
@@ -212,7 +212,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.5</span>
+            <span class="version-badge">v2.3.6</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -979,8 +979,13 @@
   }
 
   function findThinkingTierOptionInOverlay(targetTier = 'high') {
-    const overlayRoot = document.querySelector('.cdk-overlay-container');
-    if (!overlayRoot) return null;
+    const overlayRoots = [
+      document.querySelector('.cdk-overlay-container'),
+      ...document.querySelectorAll('.cdk-overlay-pane'),
+      ...document.querySelectorAll('[role="menu"]'),
+      ...document.querySelectorAll('.mat-mdc-menu-panel'),
+      document.body,
+    ].filter(Boolean);
 
     const candidateSelectors = [
       'button[role="menuitem"]',
@@ -1005,12 +1010,14 @@
     ];
 
     const candidates = [];
-    for (const sel of candidateSelectors) {
-      overlayRoot.querySelectorAll(sel).forEach((el) => {
-        if (isVisible(el) && !candidates.includes(el)) {
-          candidates.push(el);
-        }
-      });
+    for (const root of overlayRoots) {
+      for (const sel of candidateSelectors) {
+        root.querySelectorAll(sel).forEach((el) => {
+          if (isVisible(el) && !candidates.includes(el)) {
+            candidates.push(el);
+          }
+        });
+      }
     }
 
     // 1. 优先寻找直接匹配目标思考档位 (如 "高" / "High") 的选项
@@ -1030,12 +1037,13 @@
             element: clickable,
             alreadySelected: isElementSelected(item) || isElementSelected(clickable),
             label: getCleanElementText(item) || targetTier.toUpperCase(),
+            isSubmenuTrigger: false,
           };
         }
       }
     }
 
-    // 2. 若未直接出现档位，寻找“思考”或“推理”等二级设置或子菜单触发器
+    // 2. 若未直接出现档位，寻找“思考”/“推理”或 Argon 模型的二级子菜单触发器
     for (const item of candidates) {
       const clean = getCleanElementText(item).toLowerCase();
       const desc = getElementDescriptor(item).toLowerCase();
@@ -1044,18 +1052,34 @@
         !matchesThinkingTier(item, 'low') &&
         !matchesThinkingTier(item, 'medium')
       ) {
-        if (
+        const hasSubmenuAttr =
+          item.getAttribute('aria-haspopup') === 'menu' ||
+          item.getAttribute('aria-haspopup') === 'true' ||
+          item.hasAttribute('matmenutriggerfor') ||
+          item.classList.contains('mat-mdc-menu-trigger') ||
+          item.classList.contains('mat-menu-trigger');
+
+        const hasChevronIcon = Array.from(item.querySelectorAll('mat-icon, svg, span, i')).some((icon) => {
+          const iconName = (icon.getAttribute('fonticon') || icon.textContent || '').trim().toLowerCase();
+          return /chevron_right|arrow_right|arrow_drop_down|expand_more|navigate_next/.test(iconName);
+        });
+
+        // 思考设置触发项
+        const isThinkingTrigger =
           /^(thinking|reasoning|思考|深度思考|推理|思考模式|思考程度|思考预算)$/i.test(clean) ||
           /\b(thinking|reasoning)\b/i.test(desc) ||
-          /(思考|推理)/.test(desc)
-        ) {
-          if (!/\b(flash|lite|argon|pro)\b/i.test(clean)) {
-            return {
-              element: item,
-              isSubmenuTrigger: true,
-              label: clean || 'Thinking',
-            };
-          }
+          /(思考|推理)/.test(desc);
+
+        // Argon 选项自身的二级菜单展开项（如 "Gemini 4 Argon >"）
+        const isArgonSubmenu =
+          /\b(argon|pro)\b/i.test(clean) && (hasSubmenuAttr || hasChevronIcon);
+
+        if (isThinkingTrigger || isArgonSubmenu) {
+          return {
+            element: item,
+            isSubmenuTrigger: true,
+            label: clean || 'Thinking/Argon Submenu',
+          };
         }
       }
     }
@@ -1151,13 +1175,21 @@
           if (tierOpt) break;
         }
 
-        // 如果发现子菜单触发器（比如“思考”或“Thinking”），模拟展开
+        // 如果发现子菜单触发器（比如“思考”或“Thinking”或 Argon 的二级菜单），模拟展开并轮询捕获子项
         if (tierOpt && tierOpt.isSubmenuTrigger) {
           reportStatus('展开思考设置', `在菜单中展开 [${tierOpt.label}]...`);
           simulateHover(tierOpt.element);
           simulateRealClick(tierOpt.element);
-          await sleep(350);
-          tierOpt = findThinkingTierOptionInOverlay(targetTier);
+          
+          const subWaitStart = Date.now();
+          while (Date.now() - subWaitStart < 2000) {
+            await sleep(100);
+            const foundTier = findThinkingTierOptionInOverlay(targetTier);
+            if (foundTier && !foundTier.isSubmenuTrigger) {
+              tierOpt = foundTier;
+              break;
+            }
+          }
         }
 
         if (tierOpt && !tierOpt.isSubmenuTrigger) {
@@ -1217,8 +1249,15 @@
             if (tierOpt && tierOpt.isSubmenuTrigger) {
               simulateHover(tierOpt.element);
               simulateRealClick(tierOpt.element);
-              await sleep(300);
-              tierOpt = findThinkingTierOptionInOverlay(targetTier);
+              const subWaitStart = Date.now();
+              while (Date.now() - subWaitStart < 2000) {
+                await sleep(100);
+                const foundTier = findThinkingTierOptionInOverlay(targetTier);
+                if (foundTier && !foundTier.isSubmenuTrigger) {
+                  tierOpt = foundTier;
+                  break;
+                }
+              }
             }
             if (tierOpt && !tierOpt.isSubmenuTrigger) {
               if (!tierOpt.alreadySelected) {
