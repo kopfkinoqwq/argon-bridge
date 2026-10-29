@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v3.0.1 (Precision Thinking Lock & Full-Duplex)",
-  "version": "3.0.1",
-  "description": "Argon Bridge v3.0.1: Precision Thinking Level lock (High/超级详尽), full-duplex reverse tool-calling, rolling handover entropy guard, zero-touch clipboard, and O(1) watchdog",
+  "name": "Argon Bridge v3.1.0 (Precision Thinking Lock & Submenu Overlay Clean)",
+  "version": "3.1.0",
+  "description": "Argon Bridge v3.1.0: Spatial isolation for Thinking Submenu, 3-stage CDK activation, and multi-pass overlay clean",
   "permissions": [
     "tabs",
     "scripting",

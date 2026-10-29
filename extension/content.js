@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v3.0.1 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v3.1.0 - Content Script for https://gemini.google.com/*
  * Full-Duplex Autonomous Agent Bus, Zero-Touch Clipboard, O(1) Watchdog & Entropy Guard
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
@@ -168,7 +168,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v3.0.1</span>
+            <span class="version-badge">v3.1.0</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -509,51 +509,44 @@
   }
 
   // =========================================================================
-  // 4. 智能模型与思考深度双重锁定引擎 (Model = Argon & Thinking Effort = High)
+  // 4. 智能模型与思考深度双重锁定引擎 (v3.1 - 专治 CDK 二级子菜单与浮层残留)
   // =========================================================================
-  const DEFAULT_TARGET_MODEL_KEYWORDS = [
-    'argon',
-    '4 argon',
-    'gemini 4',
-    'pro',
-    'advanced',
-    'deep think',
-    '高级',
-    '思考',
-    '2.5 pro',
-    '1.5 pro',
-    'ultra',
-  ];
-
-  const THINKING_LEVEL_SYNONYMS = {
-    high: ['high', '高', '深度思考', '深度推理', '深度', '最高', '最大', 'deep', 'maximum', 'extra thorough'],
-    medium: ['medium', 'med', '中', '中等', '标准', '均衡', 'balanced'],
-    low: ['low', 'minimal', '低', '轻量', '快速', '浅度', 'fast', 'quick'],
-  };
+  const DEFAULT_TARGET_MODEL_KEYWORDS = ['argon', '4 argon', 'gemini 4', 'pro', 'advanced', 'deep think'];
 
   function isVisible(el) {
-    if (!el) return false;
+    if (!el || !(el instanceof Element)) return false;
     const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
       return false;
     }
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
 
-  function simulateRealClick(el) {
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const clientX = rect.left + rect.width / 2;
-    const clientY = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
-    el.dispatchEvent(new PointerEvent('pointerdown', opts));
-    el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.dispatchEvent(new PointerEvent('pointerup', opts));
-    el.dispatchEvent(new MouseEvent('mouseup', opts));
-    el.click();
+  /**
+   * 提取纯净可见文本（移除 icon 字体名如 "check"、"chevron_right"、"spark" 等干扰）
+   */
+  function getCleanElementText(el) {
+    if (!el) return '';
+    const clone = el.cloneNode(true);
+    clone
+      .querySelectorAll('mat-icon, .material-symbols-outlined, .google-symbols, svg, script, style')
+      .forEach((icon) => icon.remove());
+    return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  function getElementDescriptor(el) {
+    if (!el) return '';
+    const clean = getCleanElementText(el);
+    const raw = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const aria = el.getAttribute('aria-label') || '';
+    const tooltip = el.getAttribute('mattooltip') || el.getAttribute('title') || '';
+    return `${clean} | ${raw} | ${aria} | ${tooltip}`.replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * 模拟鼠标悬停（用于触发 Angular Material matMenuTriggerFor 二级子菜单展开）
+   */
   function simulateHover(el) {
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -562,30 +555,81 @@
     const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
     el.dispatchEvent(new PointerEvent('pointerenter', opts));
     el.dispatchEvent(new MouseEvent('mouseenter', opts));
-    el.dispatchEvent(new PointerEvent('pointerover', opts));
+    el.dispatchEvent(new PointerEvent('pointermove', opts));
+    el.dispatchEvent(new MouseEvent('mousemove', opts));
     el.dispatchEvent(new MouseEvent('mouseover', opts));
   }
 
-  function getCleanElementText(el) {
-    if (!el) return '';
-    try {
-      const clone = el.cloneNode(true);
-      clone
-        .querySelectorAll('mat-icon, svg, .material-symbols-outlined, .google-symbols, mat-spinner')
-        .forEach((n) => n.remove());
-      return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
-    } catch (_) {
-      return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-    }
+  /**
+   * 模拟真实物理点击（含中心坐标计算，兼容 Angular CDK PointerEvent & MouseEvent）
+   */
+  function simulateRealClick(el) {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const clientX = rect.left + Math.max(2, rect.width / 2);
+    const clientY = rect.top + Math.max(2, rect.height / 2);
+    const downOpts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0,
+      buttons: 1,
+    };
+    const upOpts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX,
+      clientY,
+      button: 0,
+      buttons: 0,
+    };
+    el.dispatchEvent(new PointerEvent('pointerdown', downOpts));
+    el.dispatchEvent(new MouseEvent('mousedown', downOpts));
+    el.dispatchEvent(new PointerEvent('pointerup', upOpts));
+    el.dispatchEvent(new MouseEvent('mouseup', upOpts));
+    el.click();
   }
 
-  function getElementDescriptor(el) {
-    if (!el) return '';
-    const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-    const aria = el.getAttribute('aria-label') || '';
-    const tooltip = el.getAttribute('mattooltip') || el.getAttribute('title') || '';
-    const testId = el.getAttribute('data-test-id') || el.getAttribute('data-value') || '';
-    return `${text} ${aria} ${tooltip} ${testId}`.replace(/\s+/g, ' ').trim();
+  /**
+   * 专为 Angular Material 3 / CDK Menu 设计的菜单项激活器：
+   * 依次执行 Hover 移入 -> Focus 聚焦 -> 物理点击 -> 若菜单未收起则补发 Enter 键确认
+   */
+  async function activateCdkMenuItem(itemEl) {
+    if (!itemEl) return;
+    simulateHover(itemEl);
+    await sleep(60);
+    if (typeof itemEl.focus === 'function') {
+      itemEl.focus();
+    }
+    await sleep(60);
+    simulateRealClick(itemEl);
+    await sleep(180);
+
+    // 如果该菜单项依然在屏幕上且尚未被标记为选中，补发键盘 Enter 与 Space 强制触发 CDK MenuItem
+    if (isVisible(itemEl) && !isElementSelected(itemEl)) {
+      const enterDown = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+      });
+      const enterUp = new KeyboardEvent('keyup', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+      });
+      itemEl.dispatchEvent(enterDown);
+      itemEl.dispatchEvent(enterUp);
+      await sleep(150);
+    }
   }
 
   function isElementSelected(el) {
@@ -595,45 +639,36 @@
       el.getAttribute('aria-selected') === 'true' ||
       el.getAttribute('aria-pressed') === 'true' ||
       el.classList.contains('mat-button-toggle-checked') ||
-      el.classList.contains('mat-mdc-chip-selected') ||
+      el.classList.contains('mat-mdc-menu-item-highlighted') ||
       el.classList.contains('selected') ||
       el.classList.contains('active')
     ) {
+      if (!el.classList.contains('mat-mdc-menu-item-highlighted') || el.getAttribute('aria-checked') === 'true') {
+        return true;
+      }
+    }
+
+    const rawText = (el.innerText || el.textContent || '').trim();
+    if (rawText.startsWith('✓') || rawText.startsWith('✔')) {
       return true;
     }
-    const parentToggle = el.closest('mat-button-toggle');
-    if (parentToggle && parentToggle.classList.contains('mat-button-toggle-checked')) {
-      return true;
-    }
-    const icons = Array.from(el.querySelectorAll('mat-icon, .material-symbols-outlined, svg'));
+
+    const icons = Array.from(
+      el.querySelectorAll('mat-icon, .material-symbols-outlined, .google-symbols, svg')
+    );
     for (const icon of icons) {
+      if (!isVisible(icon)) continue;
       const iconText = (icon.textContent || '').trim().toLowerCase();
-      if (iconText === 'check' || iconText === 'done' || iconText === 'radio_button_checked') {
+      if (
+        iconText === 'check' ||
+        iconText === 'done' ||
+        iconText === 'check_circle' ||
+        iconText === 'radio_button_checked'
+      ) {
         return true;
       }
     }
     return false;
-  }
-
-  async function closeActiveOverlays() {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-    await sleep(120);
-    const backdrops = Array.from(document.querySelectorAll('.cdk-overlay-backdrop'));
-    for (const bd of backdrops) {
-      try {
-        bd.remove();
-      } catch (_) {}
-    }
-    const panes = Array.from(document.querySelectorAll('.cdk-overlay-pane'));
-    for (const p of panes) {
-      if (p.querySelector('button[role="menuitem"], mat-button-toggle, mat-option, .bard-mode-list-button')) {
-        try {
-          p.remove();
-        } catch (_) {}
-      }
-    }
-    await sleep(80);
   }
 
   function findSafetyBlockElement() {
@@ -652,198 +687,6 @@
       if (el && isVisible(el)) return el;
     }
     return null;
-  }
-
-  function findModelSwitcherButton() {
-    const explicitSelectors = [
-      'bard-mode-switcher button',
-      '[data-test-id="bard-mode-menu-button"]',
-      '[data-test-id*="model-selector"]',
-      'input-area-v2 button[aria-haspopup="menu"]',
-      'rich-textarea ~ * button[aria-haspopup="menu"]',
-      'button[aria-label*="model" i]',
-      'button[aria-label*="模型"]',
-      'button[aria-label*="模式"]',
-      '.input-area button[aria-haspopup="true"]',
-      '.input-area button[aria-expanded]',
-    ];
-
-    for (const sel of explicitSelectors) {
-      const btns = Array.from(document.querySelectorAll(sel));
-      for (const btn of btns) {
-        if (!isVisible(btn)) continue;
-        const desc = getElementDescriptor(btn);
-        if (/flash|argon|pro|advanced|gemini|\d\.\d/i.test(desc)) {
-          return btn;
-        }
-      }
-    }
-
-    const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
-    for (const btn of allButtons) {
-      if (!isVisible(btn)) continue;
-      if (btn.closest('mat-sidenav') || btn.closest('pre') || btn.closest('model-response')) continue;
-      const text = (btn.innerText || '').replace(/\s+/g, ' ').trim();
-      if (
-        text.length > 0 &&
-        text.length <= 32 &&
-        /\b(flash|argon|pro|advanced|deep\s*think)\b/i.test(text)
-      ) {
-        return btn;
-      }
-    }
-    return null;
-  }
-
-  function findStandaloneThinkingButton(modelBtn = null) {
-    const inputArea =
-      document.querySelector('input-area-v2') ||
-      document.querySelector('.input-area-container') ||
-      document.querySelector('.input-area') ||
-      (document.querySelector('rich-textarea')
-        ? document.querySelector('rich-textarea').closest('form, .input-area, main')
-        : null) ||
-      document.body;
-
-    const inlineToggles = Array.from(
-      inputArea.querySelectorAll('mat-button-toggle button, [role="radio"], [role="tab"]')
-    ).filter(isVisible);
-    if (inlineToggles.length >= 2) {
-      const hasHigh = inlineToggles.some((el) => matchesThinkingTier(el, 'high'));
-      const hasLow = inlineToggles.some((el) => matchesThinkingTier(el, 'low'));
-      if (hasHigh && hasLow) {
-        return { type: 'inline-group', elements: inlineToggles };
-      }
-    }
-
-    const candidates = Array.from(
-      inputArea.querySelectorAll('button, [role="button"], mat-chip-option, [role="combobox"]')
-    ).filter((el) => {
-      if (!isVisible(el)) return false;
-      if (modelBtn && (el === modelBtn || modelBtn.contains(el) || el.contains(modelBtn))) return false;
-      if (el.closest('mat-sidenav') || el.closest('model-response') || el.closest('pre')) return false;
-      return true;
-    });
-
-    for (const btn of candidates) {
-      const desc = getElementDescriptor(btn).toLowerCase();
-      const shortText = (btn.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
-
-      if (
-        /\b(thinking|reasoning|effort|budget|思考|推理|深度)\b/i.test(desc) ||
-        /^(low|medium|high|minimal|低|中|高|深度思考|轻量推理)$/i.test(shortText) ||
-        /\b(thinking|思考|推理)\s*[:：-]?\s*(low|medium|high|低|中|高)\b/i.test(desc)
-      ) {
-        return { type: 'dropdown-button', element: btn };
-      }
-    }
-
-    return null;
-  }
-
-  function matchesThinkingTier(el, tierKey = 'high') {
-    if (!el) return false;
-    const cleanText = getCleanElementText(el).toLowerCase();
-    const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const ariaText = (
-      (el.getAttribute('aria-label') || '') +
-      ' ' +
-      (el.getAttribute('data-test-id') || '') +
-      ' ' +
-      (el.getAttribute('data-value') || '')
-    )
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-
-    // 严苛过滤：任何属于主模型选择项的元素绝对不属于思考档位！
-    if (
-      /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(cleanText) ||
-      /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(ariaText) ||
-      /极速回答|全方位帮助|高级推理|复杂任务/i.test(cleanText) ||
-      /极速回答|全方位帮助|高级推理|复杂任务/i.test(rawText)
-    ) {
-      return false;
-    }
-
-    if (tierKey === 'high') {
-      // 必须绝对排除低档与中档
-      if (/^(low|medium|minimal|off|低|中|关闭)\b/i.test(cleanText)) return false;
-      if (cleanText.includes('低') || cleanText.includes('中') || cleanText.includes('快速高效') || cleanText.includes('深度适中')) {
-        return false;
-      }
-      if (
-        cleanText === '高' ||
-        cleanText === 'high' ||
-        cleanText.includes('超级详尽') ||
-        cleanText.includes('extra thorough') ||
-        cleanText.includes('深度思考') ||
-        cleanText.includes('maximum') ||
-        /^(高|high)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
-        /\bhigh\b/i.test(ariaText) ||
-        /^(高|high)$/i.test(ariaText)
-      ) {
-        return true;
-      }
-    } else if (tierKey === 'low') {
-      if (cleanText.includes('高') || cleanText.includes('中') || cleanText.includes('超级详尽') || cleanText.includes('深度适中')) {
-        return false;
-      }
-      if (
-        cleanText === '低' ||
-        cleanText === 'low' ||
-        cleanText.includes('快速高效') ||
-        cleanText.includes('minimal') ||
-        /^(低|low)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
-        /\b(low|minimal)\b/i.test(ariaText)
-      ) {
-        return true;
-      }
-    } else if (tierKey === 'medium') {
-      if (cleanText.includes('高') || cleanText.includes('低') || cleanText.includes('超级详尽') || cleanText.includes('快速高效')) {
-        return false;
-      }
-      if (
-        cleanText === '中' ||
-        cleanText === 'medium' ||
-        cleanText.includes('深度适中') ||
-        cleanText.includes('balanced') ||
-        /^(中|medium)(\s|$|[\n\r（\(·:：])/i.test(cleanText) ||
-        /\bmedium\b/i.test(ariaText)
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  function isDescriptorAlreadyAtTier(descText, targetTier = 'high') {
-    if (!descText) return false;
-    let norm = descText.replace(/\s+/g, ' ').trim().toLowerCase();
-
-    // 剔除模型本身的描述，例如 "3.1 Pro 高级推理" 包含 "高级推理"，不能让其将思考判定为 High
-    norm = norm.replace(/高级推理/g, '').replace(/复杂任务/g, '');
-
-    if (targetTier === 'high') {
-      // 若包含 low / 低 / 中，绝不是 High
-      if (/(\b(low|medium|minimal|off)\b|[:：\s](低|中|轻量|标准|关闭)(?:$|\s|\)))/i.test(norm)) {
-        return false;
-      }
-      if (
-        /\b(high|maximum|deep)\b/i.test(norm) ||
-        /(高|深度思考|深度推理|深度|最高|最大|超级详尽)/.test(norm)
-      ) {
-        return true;
-      }
-      return false;
-    } else if (targetTier === 'low') {
-      if (/(\b(high|medium)\b|[:：\s](高|中)(?:$|\s|\)))/i.test(norm)) {
-        return false;
-      }
-      return /\b(low|minimal|fast)\b/i.test(norm) || /(低|轻量|快速|浅度|快速高效)/.test(norm);
-    }
-    return false;
   }
 
   // =========================================================================
@@ -877,43 +720,394 @@
     }
   }
 
-  function findTargetModelOptionInOverlay(targetKeywords) {
-    const overlayRoot = document.querySelector('.cdk-overlay-container');
-    if (!overlayRoot) return null;
+  /**
+   * 检查当前页面是否仍有打开的 CDK Menu / 浮层面板
+   */
+  function getOpenOverlayMenuPanes() {
+    const container = document.querySelector('.cdk-overlay-container');
+    if (!container) return [];
+    const panes = Array.from(container.querySelectorAll('.cdk-overlay-pane')).filter(isVisible);
+    return panes.filter((pane) => {
+      // 排除 Tooltip 浮层，只针对包含菜单项或选项的交互浮层
+      const hasMenuContent = pane.querySelector(
+        '[role="menu"], [role="listbox"], [role="menuitem"], [role="menuitemradio"], [role="option"], .mat-mdc-menu-panel, .mat-mdc-menu-item, button'
+      );
+      return Boolean(hasMenuContent);
+    });
+  }
 
-    const candidateSelectors = [
-      'button[role="menuitem"]',
-      'button[role="menuitemradio"]',
-      '[role="option"]',
-      'mat-option',
-      '.mat-mdc-menu-item',
-      '.bard-mode-list-button',
-      '.cdk-overlay-pane button',
+  /**
+   * 工业级多轮栈式 Overlay 优雅关闭器（彻底解决主菜单+二级子菜单双层悬停残留，且绝不破坏 Angular 视图树）
+   */
+  async function closeActiveOverlays() {
+    for (let pass = 0; pass < 4; pass++) {
+      const openPanes = getOpenOverlayMenuPanes();
+      if (openPanes.length === 0) {
+        break;
+      }
+
+      // 1. 向当前激活元素、最顶层菜单面板及 document 广播完整 Escape 键（逐层弹出菜单栈）
+      const escTargets = [
+        document.activeElement,
+        openPanes[openPanes.length - 1].querySelector('[role="menu"], .mat-mdc-menu-panel') ||
+          openPanes[openPanes.length - 1],
+        document.body,
+        document,
+      ].filter(Boolean);
+
+      for (const target of escTargets) {
+        try {
+          target.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+          target.dispatchEvent(
+            new KeyboardEvent('keyup', {
+              key: 'Escape',
+              code: 'Escape',
+              keyCode: 27,
+              which: 27,
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        } catch (_) {}
+      }
+      await sleep(140);
+
+      if (getOpenOverlayMenuPanes().length === 0) break;
+
+      // 2. 点击所有可见的 CDK Backdrop（无论是 showing 还是 transparent 透明遮罩）
+      const backdrops = Array.from(
+        document.querySelectorAll('.cdk-overlay-container .cdk-overlay-backdrop')
+      ).filter(isVisible);
+      for (const bd of backdrops.reverse()) {
+        simulateRealClick(bd);
+        await sleep(120);
+      }
+
+      if (getOpenOverlayMenuPanes().length === 0) break;
+
+      // 3. 触发 Angular CDK OverlayOutsideClickDispatcher（点击页面安全空白处或收起 aria-expanded 按钮）
+      const expandedBtn = findModelSwitcherButton();
+      if (expandedBtn && expandedBtn.getAttribute('aria-expanded') === 'true') {
+        simulateRealClick(expandedBtn);
+        await sleep(150);
+      } else {
+        const safeTarget = document.querySelector('main') || document.body;
+        const opts = { bubbles: true, cancelable: true, view: window, clientX: 10, clientY: 200 };
+        safeTarget.dispatchEvent(new PointerEvent('pointerdown', opts));
+        safeTarget.dispatchEvent(new MouseEvent('mousedown', opts));
+        safeTarget.dispatchEvent(new PointerEvent('pointerup', opts));
+        safeTarget.dispatchEvent(new MouseEvent('mouseup', opts));
+        safeTarget.dispatchEvent(new MouseEvent('click', opts));
+        await sleep(150);
+      }
+    }
+  }
+
+  /**
+   * 定位底部输入栏或顶部模型切换器药丸按钮
+   */
+  function findModelSwitcherButton() {
+    const explicitSelectors = [
+      'bard-mode-switcher button',
+      '[data-test-id="bard-mode-menu-button"]',
+      '[data-test-id*="model-selector"]',
+      'input-area-v2 button[aria-haspopup="menu"]',
+      'rich-textarea ~ * button[aria-haspopup="menu"]',
+      'button[aria-label*="model" i]',
+      'button[aria-label*="模型"]',
+      'button[aria-label*="模式"]',
     ];
 
-    const items = [];
-    for (const sel of candidateSelectors) {
-      overlayRoot.querySelectorAll(sel).forEach((el) => {
-        if (isVisible(el) && !items.includes(el)) {
-          if (!matchesThinkingTier(el, 'high') && !matchesThinkingTier(el, 'low') && !matchesThinkingTier(el, 'medium')) {
-            items.push(el);
-          }
+    for (const sel of explicitSelectors) {
+      const btns = Array.from(document.querySelectorAll(sel));
+      for (const btn of btns) {
+        if (!isVisible(btn)) continue;
+        const desc = getElementDescriptor(btn);
+        if (/flash|argon|pro|advanced|gemini|\d\.\d/i.test(desc)) {
+          return btn;
         }
-      });
+      }
     }
 
-    try {
-      const discovered = items.map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
-      if (discovered.length > 0) {
-        reportStatus('模型下拉选项已展开', `发现菜单项: [${discovered.join(' | ')}]`);
+    const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    for (const btn of allButtons) {
+      if (!isVisible(btn)) continue;
+      if (btn.closest('mat-sidenav') || btn.closest('pre') || btn.closest('model-response') || btn.closest('.cdk-overlay-container')) {
+        continue;
       }
-    } catch (_) {}
+      const text = getCleanElementText(btn);
+      if (
+        text.length > 0 &&
+        text.length <= 32 &&
+        /\b(flash|argon|pro|advanced|deep\s*think)\b/i.test(text)
+      ) {
+        return btn;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 检查底部模型药丸是否已经体现出“高 / High”状态（如 "Argon 高" 或 "Argon High"）
+   */
+  function isModelPillShowingHigh(btn) {
+    if (!btn) return false;
+    const clean = getCleanElementText(btn);
+    const aria = btn.getAttribute('aria-label') || '';
+    const combined = `${clean} ${aria}`.trim();
+    if (/(\b(low|medium|minimal)\b|低|中)/i.test(combined)) return false;
+    return /(\bhigh\b|高|超级详尽|深度)/i.test(combined);
+  }
+
+  /**
+   * 精准判断单个菜单项节点是否匹配指定的思考等级 ('high' | 'medium' | 'low')
+   * @param {Element} el 候选菜单项根节点
+   * @param {string} tierKey 'high' | 'medium' | 'low'
+   * @param {boolean} isInsideVerifiedSubmenu 是否已确认位于二级“思考等级”子菜单面板内
+   */
+  function matchesThinkingTier(el, tierKey = 'high', isInsideVerifiedSubmenu = false) {
+    if (!el) return false;
+    const cleanText = getCleanElementText(el).toLowerCase();
+    const rawText = (el.innerText || el.textContent || '')
+      .replace(/[✓✔]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const combinedText = `${cleanText} ${rawText}`.trim();
+
+    // 1. 排除子菜单触发器本身（如 "思考等级 ▶" / "Thinking level"）
+    if (/(思考等级|思考深度|推理程度|thinking\s*level|thinking\s*effort|reasoning\s*effort)/i.test(combinedText)) {
+      return false;
+    }
+
+    // 2. 如果不在已验证的二级子菜单内，严防误伤主菜单中的模型项（如 "3.1 Pro 高级推理"、"4 Argon 复杂任务"）
+    if (!isInsideVerifiedSubmenu) {
+      if (
+        /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(combinedText) ||
+        /极速回答|全方位帮助|高级推理|复杂任务/i.test(combinedText)
+      ) {
+        return false;
+      }
+    }
+
+    // 3. 避免匹配到包裹了全部三个选项的外层父容器
+    const hasLowWord = /(快速高效|fast\s*and\s*efficient|\blow\b|(^|\s)低(\s|$))/i.test(combinedText);
+    const hasMedWord = /(深度适中|balanced|\bmedium\b|(^|\s)中(\s|$))/i.test(combinedText);
+    const hasHighWord = /(超级详尽|extra\s*thorough|\bhigh\b|(^|\s)高(\s|$))/i.test(combinedText);
+    if ((hasLowWord && hasHighWord) || (hasMedWord && hasHighWord)) {
+      return false; // 这是父级列表容器，不是单个叶子菜单项
+    }
+
+    if (tierKey === 'high') {
+      if (hasLowWord || hasMedWord) return false;
+      if (
+        combinedText.includes('超级详尽') ||
+        combinedText.includes('extra thorough') ||
+        combinedText.includes('深度思考') ||
+        combinedText.includes('maximum') ||
+        /^(高|high)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
+        /^(高|high)(\s|$|[\n\r（\(·:：/-])/i.test(rawText) ||
+        cleanText === '高' ||
+        rawText === '高'
+      ) {
+        return true;
+      }
+    } else if (tierKey === 'medium') {
+      if (hasLowWord || hasHighWord) return false;
+      if (
+        combinedText.includes('深度适中') ||
+        /^(中|medium)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
+        /^(中|medium)(\s|$|[\n\r（\(·:：/-])/i.test(rawText)
+      ) {
+        return true;
+      }
+    } else if (tierKey === 'low') {
+      if (hasMedWord || hasHighWord) return false;
+      if (
+        combinedText.includes('快速高效') ||
+        /^(低|low|minimal)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
+        /^(低|low|minimal)(\s|$|[\n\r（\(·:：/-])/i.test(rawText)
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * 从任意给定的浮层容器（Pane 或 OverlayRoot）中提取可点击的菜单项候选列表
+   */
+  function collectMenuItemCandidates(scopeRoot) {
+    if (!scopeRoot) return [];
+    const selector = [
+      'button[role="menuitemradio"]',
+      'button[role="menuitem"]',
+      '[role="menuitemradio"]',
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="radio"]',
+      'mat-option',
+      '.mat-mdc-menu-item',
+      'mat-button-toggle button',
+      'button',
+    ].join(', ');
+
+    const rawNodes = Array.from(scopeRoot.querySelectorAll(selector)).filter(isVisible);
+    const uniqueInteractive = [];
+
+    for (const node of rawNodes) {
+      // 向上收敛到最标准的可交互宿主（避免重复收集 button 和它内部的 span）
+      const interactiveHost =
+        node.closest(
+          '[role="menuitemradio"], [role="menuitem"], [role="option"], .mat-mdc-menu-item, mat-option, button'
+        ) || node;
+      if (isVisible(interactiveHost) && !uniqueInteractive.includes(interactiveHost)) {
+        uniqueInteractive.push(interactiveHost);
+      }
+    }
+    return uniqueInteractive;
+  }
+
+  /**
+   * 核心空间隔离器：在所有已打开的 .cdk-overlay-pane 中，精准识别“思考等级”二级子菜单面板
+   * 判定依据：该 Pane 的文本同时包含“低/快速高效”与“高/超级详尽”（或存在多个 Pane 时位于最上层/最右侧的子面板）
+   */
+  function findThinkingSubmenuPane() {
+    const panes = getOpenOverlayMenuPanes();
+    if (panes.length === 0) return null;
+
+    // 逆序遍历（CDK 后打开的二级子菜单 Pane 必定排在 DOM 后面）
+    for (let i = panes.length - 1; i >= 0; i--) {
+      const pane = panes[i];
+      const paneText = getCleanElementText(pane).toLowerCase();
+      const hasHighCue = /(超级详尽|extra\s*thorough|\bhigh\b|高)/i.test(paneText);
+      const hasLowCue = /(快速高效|fast|\blow\b|低)/i.test(paneText);
+      const isMainModelMenu = /(4\s*argon|复杂任务|3\.1\s*pro|flash)/i.test(paneText);
+
+      // 如果该面板包含 高+低 特征，且不包含主模型列表（说明它是纯粹的二级子菜单 Pane！）
+      if (hasHighCue && hasLowCue && !isMainModelMenu) {
+        return { pane, isVerifiedSubmenu: true };
+      }
+    }
+
+    // 如果某些布局把思考等级内联在同一个面板里，退回检查所有面板
+    for (let i = panes.length - 1; i >= 0; i--) {
+      const pane = panes[i];
+      const paneText = getCleanElementText(pane).toLowerCase();
+      if (/(超级详尽|extra\s*thorough)/i.test(paneText)) {
+        return { pane, isVerifiedSubmenu: false };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 专门在二级子菜单（或已打开的浮层）中查找目标思考档位叶子节点（绝不返回 isSubmenuTrigger，防止死循环）
+   */
+  function findThinkingTierLeafOption(targetTier = 'high') {
+    // 1. 优先在已隔离的二级子菜单 Pane 中查找
+    const submenuInfo = findThinkingSubmenuPane();
+    if (submenuInfo) {
+      const items = collectMenuItemCandidates(submenuInfo.pane);
+      for (const item of items) {
+        if (matchesThinkingTier(item, targetTier, submenuInfo.isVerifiedSubmenu)) {
+          const isDisabled =
+            item.disabled ||
+            item.getAttribute('aria-disabled') === 'true' ||
+            item.classList.contains('mat-mdc-menu-item-disabled');
+          if (!isDisabled) {
+            return {
+              element: item,
+              alreadySelected: isElementSelected(item),
+              label: getCleanElementText(item) || targetTier.toUpperCase(),
+            };
+          }
+        }
+      }
+    }
+
+    // 2. 遍历所有打开的 Pane（逆序，子菜单优先）
+    const panes = getOpenOverlayMenuPanes();
+    for (let i = panes.length - 1; i >= 0; i--) {
+      const items = collectMenuItemCandidates(panes[i]);
+      for (const item of items) {
+        if (matchesThinkingTier(item, targetTier, false)) {
+          const isDisabled =
+            item.disabled ||
+            item.getAttribute('aria-disabled') === 'true' ||
+            item.classList.contains('mat-mdc-menu-item-disabled');
+          if (!isDisabled) {
+            return {
+              element: item,
+              alreadySelected: isElementSelected(item),
+              label: getCleanElementText(item) || targetTier.toUpperCase(),
+            };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 在主模型菜单中查找“思考等级 ▶ / Thinking level”二级菜单入口触发器
+   */
+  function findThinkingSubmenuTriggerInOverlay() {
+    const panes = getOpenOverlayMenuPanes();
+    for (const pane of panes) {
+      const items = collectMenuItemCandidates(pane);
+      for (const item of items) {
+        const text = getCleanElementText(item).toLowerCase();
+        const aria = (item.getAttribute('aria-label') || '').toLowerCase();
+        const hasSubmenuAttr =
+          item.getAttribute('aria-haspopup') === 'menu' ||
+          item.getAttribute('aria-haspopup') === 'true' ||
+          item.classList.contains('mat-mdc-menu-submenu-trigger');
+
+        if (
+          /(思考等级|思考深度|推理程度|思考模式|thinking\s*level|thinking\s*effort|reasoning)/i.test(
+            `${text} ${aria}`
+          ) ||
+          (hasSubmenuAttr && /(思考|推理|thinking|reasoning)/i.test(`${text} ${aria}`))
+        ) {
+          return item;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 在主模型菜单中查找目标主模型项（如 "4 Argon / 复杂任务"）
+   */
+  function findTargetModelOptionInOverlay(targetKeywords) {
+    const panes = getOpenOverlayMenuPanes();
+    if (panes.length === 0) return null;
+
+    // 主模型一定在第一个打开的主菜单 Pane (panes[0]) 中
+    const mainPane = panes[0];
+    const items = collectMenuItemCandidates(mainPane);
 
     for (const keyword of targetKeywords) {
       const kw = keyword.toLowerCase();
       for (const item of items) {
-        const itemText = getElementDescriptor(item).toLowerCase();
-        if (itemText.includes(kw)) {
+        // 排除“思考等级”触发器本身
+        const text = getCleanElementText(item).toLowerCase();
+        if (/(思考等级|thinking\s*level|超级详尽|快速高效|深度适中)/i.test(text)) continue;
+
+        if (text.includes(kw)) {
           const isDisabled =
             item.disabled ||
             item.getAttribute('aria-disabled') === 'true' ||
@@ -922,16 +1116,16 @@
             return {
               element: item,
               matchedKeyword: keyword,
-              fullText: (item.innerText || '').replace(/\s+/g, ' ').trim(),
+              fullText: getCleanElementText(item),
               alreadySelected: isElementSelected(item),
             };
           } else {
-            // 选项存在但被官方置灰禁用 -> 100% 确诊官方额度耗尽！
+            // 选项存在但被官方置灰禁用 -> 确诊官方额度耗尽！
             setArgonQuotaExhausted(true, 'Argon 选项被官方置灰禁用（当前周期额度已达上限）');
             return {
               element: item,
               matchedKeyword: keyword,
-              fullText: (item.innerText || '').replace(/\s+/g, ' ').trim(),
+              fullText: getCleanElementText(item),
               isDisabled: true,
               quotaExhausted: true,
             };
@@ -942,119 +1136,72 @@
     return null;
   }
 
-  function findThinkingTierOptionInOverlay(targetTier = 'high') {
-    const overlayRoots = [
-      document.querySelector('.cdk-overlay-container'),
-      ...document.querySelectorAll('.cdk-overlay-pane'),
-      ...document.querySelectorAll('[role="menu"]'),
-      ...document.querySelectorAll('.mat-mdc-menu-panel'),
-      document.body,
-    ].filter(Boolean);
+  /**
+   * 展开“思考等级 ▶”二级子菜单并选中目标档位（如“高 / 超级详尽”）
+   */
+  async function expandSubmenuAndSelectTier(submenuTriggerEl, targetTier = 'high') {
+    if (!submenuTriggerEl) return false;
 
-    const candidateSelectors = [
-      'button[role="menuitem"]',
-      'button[role="menuitemradio"]',
-      'button[role="radio"]',
-      '[role="menuitem"]',
-      '[role="menuitemradio"]',
-      '[role="radio"]',
-      'mat-button-toggle button',
-      'mat-button-toggle',
-      'mat-radio-button',
-      '.mat-mdc-radio-button',
-      '[role="option"]',
-      'mat-option',
-      '.mat-mdc-menu-item',
-      '.cdk-overlay-pane button',
-      '.cdk-overlay-pane [tabindex="0"]',
-      '.cdk-overlay-pane [role="button"]',
-      'mat-chip-option',
-      '[data-test-id*="thinking"]',
-      '[data-test-id*="tier"]',
-    ];
+    // 第一步：先通过 Hover 悬停触发 Angular Material 子菜单自然展开（切勿立即 Click 以免二次翻转关闭）
+    submenuTriggerEl.focus();
+    simulateHover(submenuTriggerEl);
 
-    const candidates = [];
-    for (const root of overlayRoots) {
-      for (const sel of candidateSelectors) {
-        root.querySelectorAll(sel).forEach((el) => {
-          if (isVisible(el) && !candidates.includes(el)) {
-            candidates.push(el);
-          }
-        });
+    let leafOpt = null;
+    const hoverWaitStart = Date.now();
+    while (Date.now() - hoverWaitStart < 1200) {
+      await sleep(100);
+      leafOpt = findThinkingTierLeafOption(targetTier);
+      if (leafOpt) break;
+    }
+
+    // 第二步：若仅靠 Hover 在 1.2s 内未展开子菜单，再执行物理 Click 或 ArrowRight 键展开
+    if (!leafOpt) {
+      simulateRealClick(submenuTriggerEl);
+      submenuTriggerEl.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          code: 'ArrowRight',
+          keyCode: 39,
+          which: 39,
+          bubbles: true,
+        })
+      );
+
+      const clickWaitStart = Date.now();
+      while (Date.now() - clickWaitStart < 2000) {
+        await sleep(100);
+        leafOpt = findThinkingTierLeafOption(targetTier);
+        if (leafOpt) break;
       }
     }
 
-    // 1. 优先寻找直接匹配目标思考档位 (如 "高" / "High") 的选项
-    for (const item of candidates) {
-      if (matchesThinkingTier(item, targetTier)) {
-        const clickable =
-          item.tagName.toLowerCase() === 'mat-button-toggle' ||
-          item.tagName.toLowerCase() === 'mat-radio-button'
-            ? item.querySelector('button, input, [role="radio"]') || item
-            : item;
-        const isDisabled =
-          clickable.disabled ||
-          clickable.getAttribute('aria-disabled') === 'true' ||
-          item.getAttribute('aria-disabled') === 'true';
-        if (!isDisabled) {
-          return {
-            element: clickable,
-            alreadySelected: isElementSelected(item) || isElementSelected(clickable),
-            label: getCleanElementText(item) || targetTier.toUpperCase(),
-            isSubmenuTrigger: false,
-          };
-        }
-      }
+    if (!leafOpt) {
+      return false;
     }
 
-    // 2. 若未直接出现档位，寻找“思考等级”二级子菜单触发项
-    for (const item of candidates) {
-      const clean = getCleanElementText(item).toLowerCase();
-      const desc = getElementDescriptor(item).toLowerCase();
-
-      // 绝对过滤掉所有模型项（严防 3.1 Pro、4 Argon、3.8 Flash 等副标题干扰）
-      const isModelOption =
-        /\b(flash|lite|pro|argon|ultra|gemini|\d\.\d)\b/i.test(clean) ||
-        /\b(flash|lite|pro|argon|ultra|gemini|\d\.\d)\b/i.test(desc) ||
-        /极速回答|全方位帮助|高级推理|复杂任务/i.test(desc);
-      if (isModelOption) continue;
-
-      if (
-        !matchesThinkingTier(item, 'high') &&
-        !matchesThinkingTier(item, 'low') &&
-        !matchesThinkingTier(item, 'medium')
-      ) {
-        const hasSubmenuAttr =
-          item.getAttribute('aria-haspopup') === 'menu' ||
-          item.getAttribute('aria-haspopup') === 'true' ||
-          item.hasAttribute('matmenutriggerfor') ||
-          item.classList.contains('mat-mdc-menu-trigger') ||
-          item.classList.contains('mat-menu-trigger');
-
-        const hasChevronIcon = Array.from(item.querySelectorAll('mat-icon, svg, span, i')).some((icon) => {
-          const iconName = (icon.getAttribute('fonticon') || icon.textContent || '').trim().toLowerCase();
-          return /chevron_right|arrow_right|arrow_drop_down|expand_more|navigate_next/.test(iconName);
-        });
-
-        // 精准瞄准思考等级触发项（专指菜单底部的 "思考等级 >"）
-        const isThinkingTrigger =
-          /(思考等级|思考模式|思考程度|思考预算|思考设置|推理等级|推理程度|thinking\s*level|thinking\s*tier|reasoning\s*level|reasoning\s*depth)/i.test(clean) ||
-          /(思考等级|思考模式|思考程度|思考预算|思考设置|推理等级|推理程度|thinking\s*level|thinking\s*tier|reasoning\s*level|reasoning\s*depth)/i.test(desc) ||
-          (/^思考\s*(>|等级|设置)?$/i.test(clean) && (hasSubmenuAttr || hasChevronIcon));
-
-        if (isThinkingTrigger) {
-          return {
-            element: item,
-            isSubmenuTrigger: true,
-            label: clean || '思考等级',
-          };
-        }
-      }
+    // 第三步：精准激活“高 / 超级详尽”叶子节点
+    if (!leafOpt.alreadySelected) {
+      reportStatus(
+        `正在锁定思考等级 -> ${targetTier.toUpperCase()}`,
+        `已定位二级菜单项 [${leafOpt.label}]，正在激活...`
+      );
+      await activateCdkMenuItem(leafOpt.element);
+      await sleep(280);
+    } else {
+      // 即便已选中，也轻点一次或直接关闭浮层使菜单自然收起
+      await activateCdkMenuItem(leafOpt.element);
+      await sleep(200);
     }
 
-    return null;
+    return true;
   }
 
+  /**
+   * 核心预检与双重锁定总控流水线：
+   * 1. 确保主模型锁定为 4 Argon
+   * 2. 确保二级子菜单“思考等级”锁定为“高 / 超级详尽”
+   * 3. 彻底清空所有 CDK Overlay 浮层并校验底部输入栏药丸状态
+   */
   async function ensureTargetModelAndThinking(preferredModel = 'Argon', preferredThinkingTier = 'high') {
     const targetModelKeywords = preferredModel
       ? [preferredModel.toLowerCase(), ...DEFAULT_TARGET_MODEL_KEYWORDS]
@@ -1068,31 +1215,34 @@
     let finalModelLabel = preferredModel;
     let thinkingLocked = false;
 
-    // 检查初始状态
-    let switcherBtn = findModelSwitcherButton();
-    if (switcherBtn) {
-      const initialDesc = getElementDescriptor(switcherBtn);
-      const isModelAlreadyArgon = initialDesc.toLowerCase().includes(targetModelKeywords[0]);
-      const isAlreadyTargetThinking = isDescriptorAlreadyAtTier(initialDesc, targetTier);
+    try {
+      const switcherBtn = findModelSwitcherButton();
+      if (!switcherBtn) {
+        return { model: finalModelLabel, thinkingLevel: targetTier, thinkingLocked: false };
+      }
 
-      // 如果模型已经是 Argon 且思考深度已经是 High（例如按钮已明确显示 "Argon 高"），直接确认并跳过，零延迟零弹窗！
-      if (isModelAlreadyArgon && isAlreadyTargetThinking) {
-        thinkingLocked = true;
-        finalModelLabel = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim() || preferredModel;
-        reportStatus('双锁预检通过', `当前模型与思考深度已处于最高档位: [${finalModelLabel}]`);
+      const initialBtnText = getCleanElementText(switcherBtn);
+      const isModelAlreadyTarget = initialBtnText.toLowerCase().includes(targetModelKeywords[0]);
+
+      // 快速短路通道：如果底部输入栏的模型药丸已经明确显示为 "Argon 高" / "Argon High"，直接零延迟放行！
+      if (isModelAlreadyTarget && targetTier === 'high' && isModelPillShowingHigh(switcherBtn)) {
+        await closeActiveOverlays();
         return {
-          model: finalModelLabel,
+          model: initialBtnText,
           thinkingLevel: targetTier,
           thinkingLocked: true,
         };
       }
 
-      // 阶段 1：若当前模型不是 Argon（如 Flash-Lite 或 Flash），先切为 Argon
-      if (!isModelAlreadyArgon) {
+      // ---------------------------------------------------------------------
+      // Pass 1：确保主模型已切换至 4 Argon
+      // ---------------------------------------------------------------------
+      if (!isModelAlreadyTarget) {
         reportStatus(
-          `正在切换模型 -> ${preferredModel}`,
-          `当前为 [${(switcherBtn.innerText || 'Flash').trim()}]，打开菜单选择 ${preferredModel}...`
+          `检测到当前模型为 [${initialBtnText || 'Flash'}]`,
+          `正在切换主模型至 ${preferredModel}...`
         );
+
         simulateRealClick(switcherBtn);
 
         let modelOpt = null;
@@ -1109,146 +1259,74 @@
             throw new Error('[QUOTA_EXHAUSTED] 云端 Gemini 4 Argon 官方额度已耗尽（选项已被官方禁用，需等待数小时重置）。已自动触发退火保护，请由本地执行官接管。');
           }
           if (!modelOpt.alreadySelected) {
-            simulateRealClick(modelOpt.element);
-            await sleep(500);
+            await activateCdkMenuItem(modelOpt.element);
+            await sleep(400);
           }
           finalModelLabel = modelOpt.fullText || preferredModel;
         }
-        await closeActiveOverlays();
-        await sleep(350);
-      }
-    }
-
-    // 阶段 2：强制锁定思考深度为目标档位 (HIGH / 高)
-    switcherBtn = findModelSwitcherButton();
-    if (switcherBtn) {
-      const descNow = getElementDescriptor(switcherBtn);
-      if (isDescriptorAlreadyAtTier(descNow, targetTier)) {
-        thinkingLocked = true;
-        finalModelLabel = (switcherBtn.innerText || '').replace(/\s+/g, ' ').trim() || finalModelLabel;
       } else {
-        reportStatus(
-          `锁定思考深度 -> ${targetTier.toUpperCase()}`,
-          `当前状态 [${(switcherBtn.innerText || '').trim()}] 未呈现高思考，正在打开菜单配置...`
-        );
+        finalModelLabel = initialBtnText || preferredModel;
+      }
 
-        // 打开模型/思考菜单
-        simulateRealClick(switcherBtn);
-
-        let tierOpt = null;
-        const waitStart = Date.now();
-        while (Date.now() - waitStart < 2500) {
-          await sleep(100);
-          tierOpt = findThinkingTierOptionInOverlay(targetTier);
-          if (tierOpt) break;
+      // ---------------------------------------------------------------------
+      // Pass 2：检查并锁定“思考等级 -> 高 (超级详尽)”
+      // ---------------------------------------------------------------------
+      const currentSwitcherBtn = findModelSwitcherButton();
+      if (currentSwitcherBtn && targetTier === 'high' && isModelPillShowingHigh(currentSwitcherBtn)) {
+        thinkingLocked = true;
+        finalModelLabel = getCleanElementText(currentSwitcherBtn) || finalModelLabel;
+      } else {
+        // 如果当前主菜单未打开，点击模型药丸呼出主菜单
+        if (getOpenOverlayMenuPanes().length === 0 && currentSwitcherBtn) {
+          simulateRealClick(currentSwitcherBtn);
+          await sleep(300);
         }
 
-        // 如果发现子菜单触发器（比如“思考等级”），模拟展开并轮询捕获子项
-        if (tierOpt && tierOpt.isSubmenuTrigger) {
-          reportStatus('展开思考设置', `在菜单中展开 [${tierOpt.label}]...`);
-          try {
-            tierOpt.element.focus();
-          } catch (_) {}
-          simulateHover(tierOpt.element);
-          await sleep(150);
-          simulateRealClick(tierOpt.element);
-
-          const subWaitStart = Date.now();
-          while (Date.now() - subWaitStart < 3000) {
-            await sleep(100);
-            const foundTier = findThinkingTierOptionInOverlay(targetTier);
-            if (foundTier && !foundTier.isSubmenuTrigger) {
-              tierOpt = foundTier;
-              break;
-            }
-          }
-        }
-
-        if (tierOpt && !tierOpt.isSubmenuTrigger) {
-          if (!tierOpt.alreadySelected) {
-            reportStatus(
-              `选中推理档位 -> ${targetTier.toUpperCase()}`,
-              `点击档位选项: [${tierOpt.label}]...`
-            );
-            simulateRealClick(tierOpt.element);
-            await sleep(400);
+        // 2a. 先检查浮层内是否已经直接可见“高 / 超级详尽”选项
+        let directLeaf = findThinkingTierLeafOption(targetTier);
+        if (directLeaf) {
+          if (!directLeaf.alreadySelected) {
+            await activateCdkMenuItem(directLeaf.element);
+            await sleep(300);
           }
           thinkingLocked = true;
-        }
+        } else {
+          // 2b. 在主菜单底部定位“思考等级 ▶”触发器，悬停展开二级子菜单并点击“高 / 超级详尽”
+          let subTrigger = null;
+          const trigWaitStart = Date.now();
+          while (Date.now() - trigWaitStart < 2000) {
+            subTrigger = findThinkingSubmenuTriggerInOverlay();
+            if (subTrigger) break;
+            await sleep(100);
+          }
 
-        await closeActiveOverlays();
-        await sleep(350);
-
-        // 最终校验：再次确认模型按钮文本
-        const finalBtn = findModelSwitcherButton();
-        if (finalBtn) {
-          const finalDesc = getElementDescriptor(finalBtn);
-          if (isDescriptorAlreadyAtTier(finalDesc, targetTier)) {
-            thinkingLocked = true;
-            finalModelLabel = (finalBtn.innerText || '').replace(/\s+/g, ' ').trim();
+          if (subTrigger) {
+            thinkingLocked = await expandSubmenuAndSelectTier(subTrigger, targetTier);
           }
         }
       }
+    } catch (err) {
+      console.warn('[Argon-Bridge] Model/Thinking lock warning:', err);
+    } finally {
+      // ---------------------------------------------------------------------
+      // Pass 3：无论成功或异常，强制执行多轮栈式拆解，确保所有 CDK 浮层 100% 关闭
+      // ---------------------------------------------------------------------
+      await closeActiveOverlays();
     }
 
-    // 阶段 3：独立输入栏控件探测（如果有独立的 Thinking 药丸/单选组）
-    if (!thinkingLocked) {
-      const standaloneCtrl = findStandaloneThinkingButton(switcherBtn);
-      if (standaloneCtrl) {
-        if (standaloneCtrl.type === 'inline-group') {
-          const highBtn = standaloneCtrl.elements.find((el) => matchesThinkingTier(el, targetTier));
-          if (highBtn) {
-            if (!isElementSelected(highBtn)) {
-              simulateRealClick(highBtn);
-              await sleep(300);
-            }
-            thinkingLocked = true;
-          }
-        } else if (standaloneCtrl.type === 'dropdown-button') {
-          const chipEl = standaloneCtrl.element;
-          const chipDesc = getElementDescriptor(chipEl);
-          if (isDescriptorAlreadyAtTier(chipDesc, targetTier)) {
-            thinkingLocked = true;
-          } else {
-            simulateRealClick(chipEl);
-            let tierOpt = null;
-            const waitStart = Date.now();
-            while (Date.now() - waitStart < 2200) {
-              await sleep(100);
-              tierOpt = findThinkingTierOptionInOverlay(targetTier);
-              if (tierOpt) break;
-            }
-            if (tierOpt && tierOpt.isSubmenuTrigger) {
-              try {
-                tierOpt.element.focus();
-              } catch (_) {}
-              simulateHover(tierOpt.element);
-              await sleep(150);
-              simulateRealClick(tierOpt.element);
-              const subWaitStart = Date.now();
-              while (Date.now() - subWaitStart < 3000) {
-                await sleep(100);
-                const foundTier = findThinkingTierOptionInOverlay(targetTier);
-                if (foundTier && !foundTier.isSubmenuTrigger) {
-                  tierOpt = foundTier;
-                  break;
-                }
-              }
-            }
-            if (tierOpt && !tierOpt.isSubmenuTrigger) {
-              if (!tierOpt.alreadySelected) {
-                simulateRealClick(tierOpt.element);
-                await sleep(350);
-              }
-              thinkingLocked = true;
-            }
-            await closeActiveOverlays();
-          }
-        }
+    // -----------------------------------------------------------------------
+    // Pass 4：最终回读底部模型药丸进行状态确认（如 "Argon 高"）并归还输入框焦点
+    // -----------------------------------------------------------------------
+    const finalBtn = findModelSwitcherButton();
+    if (finalBtn) {
+      const updatedPillText = getCleanElementText(finalBtn);
+      if (updatedPillText) {
+        finalModelLabel = updatedPillText;
+      }
+      if (isModelPillShowingHigh(finalBtn)) {
+        thinkingLocked = true;
       }
     }
-
-    await closeActiveOverlays();
 
     const inputEl = findInputElement();
     if (inputEl) {
@@ -1256,10 +1334,10 @@
     }
 
     reportStatus(
-      `双锁就绪: ${finalModelLabel} · Thinking=${thinkingLocked ? targetTier.toUpperCase() : 'DEFAULT'}`,
+      `双锁就绪: [${finalModelLabel}]`,
       thinkingLocked
-        ? `已确认开启 ${targetTier.toUpperCase()} 深度思考模式`
-        : `⚠️ 提示: 未能在界面锁定高思考开关，将以当前档位 (${finalModelLabel}) 发送`
+        ? `已锁定 ${targetTier.toUpperCase()} (超级详尽) 思考等级，浮层已清理`
+        : `主模型已就绪 (${finalModelLabel})`
     );
 
     return {
