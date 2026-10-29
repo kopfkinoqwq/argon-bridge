@@ -1,5 +1,6 @@
 /**
- * Argon Bridge v2.3.6 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v2.4.0 - Content Script for https://gemini.google.com/*
+ * Zero-Touch Clipboard Interception, O(1) Tail-Scoped Watchdog & Three-Lock State Machine
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
  * 2. Automatic waiting for rich-textarea readiness after session switching
@@ -22,55 +23,10 @@
   }
 
   // =========================================================================
-  // 1. 注入主世界剪贴板拦截器
+  // 1. MAIN World 零触剪贴板协议常量 (Zero-Touch Clipboard Interception)
   // =========================================================================
-  function injectClipboardInterceptor() {
-    try {
-      const script = document.createElement('script');
-      script.textContent = `
-        (function() {
-          if (window.__ARGON_CLIPBOARD_HOOKED__) return;
-          window.__ARGON_CLIPBOARD_HOOKED__ = true;
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            const origWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
-            navigator.clipboard.writeText = async function(text) {
-              try {
-                window.dispatchEvent(new CustomEvent('__ARGON_CLIPBOARD_CAPTURED__', {
-                  detail: { text: String(text || ''), timestamp: Date.now() }
-                }));
-              } catch (_) {}
-              try {
-                return await origWriteText(text);
-              } catch (_) {
-                return Promise.resolve();
-              }
-            };
-          }
-          document.addEventListener('copy', function(e) {
-            try {
-              const pasted = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
-              if (pasted) {
-                window.dispatchEvent(new CustomEvent('__ARGON_CLIPBOARD_CAPTURED__', {
-                  detail: { text: String(pasted), timestamp: Date.now() }
-                }));
-              }
-            } catch (_) {}
-          }, true);
-        })();
-      `;
-      (document.head || document.documentElement).appendChild(script);
-      script.remove();
-    } catch (_) {}
-
-    window.addEventListener('__ARGON_CLIPBOARD_CAPTURED__', (event) => {
-      if (event && event.detail && typeof event.detail.text === 'string') {
-        lastCapturedClipboardText = event.detail.text;
-        lastCapturedClipboardTime = event.detail.timestamp || Date.now();
-      }
-    });
-  }
-
-  injectClipboardInterceptor();
+  const MSG_SOURCE_CONTENT = 'ARGON_BRIDGE_CONTENT';
+  const MSG_SOURCE_MAIN = 'ARGON_BRIDGE_MAIN';
 
   // =========================================================================
   // 2. 右上角悬浮状态窗 (含当前绑定项目与 Chat ID 显示)
@@ -212,7 +168,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v2.3.6</span>
+            <span class="version-badge">v2.4.0</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -1762,56 +1718,321 @@
       .trim();
   }
 
-  async function extractCleanMarkdown(responseNode, taskPrompt = '') {
-    // 方案 1 (最优先且最稳定)：DOM 级结构化 Markdown 序列化提取
-    const domMarkdown = convertDomNodeToMarkdown(responseNode);
-    if (domMarkdown && domMarkdown.trim().length > 100) {
-      return {
-        markdown: domMarkdown.trim(),
-        source: 'dom-markdown-serializer',
-      };
+  // =========================================================================
+  // 5. 零触剪贴板捕获 (Zero-Touch Clipboard Interception)
+  // =========================================================================
+
+  /**
+   * 在已锁定的尾节点容器内，精准定位【回复级】复制按钮，严防误触代码块复制按钮
+   * @param {HTMLElement} activeTurnNode 当前轮次锁定的回复容器
+   * @returns {HTMLButtonElement | null}
+   */
+  function findResponseCopyButton(activeTurnNode) {
+    if (!activeTurnNode) return null;
+
+    // 排除黑名单：代码块容器、内联代码、思考过程折叠容器、用户提问区
+    const EXCLUDE_ZONE_SELECTOR = [
+      'code-block',
+      '.code-block',
+      'pre',
+      'code',
+      '[class*="code-block"]',
+      '[data-test-id*="code"]',
+      'model-thoughts',
+      '[data-test-id*="thought"]',
+      'user-query',
+    ].join(', ');
+
+    // 优先从回复底部的 Action Bar 容器内查找
+    const actionScope =
+      activeTurnNode.querySelector('message-actions, .message-actions, .response-footer') || activeTurnNode;
+    const candidateButtons = actionScope.querySelectorAll('button, [role="button"]');
+
+    for (const btn of candidateButtons) {
+      // 1. 铁律：一旦按钮位于代码块或排除区域内部，直接跳过
+      if (btn.closest(EXCLUDE_ZONE_SELECTOR)) continue;
+
+      // 2. 提取多维语义属性
+      const testId = (btn.getAttribute('data-test-id') || '').toLowerCase();
+      const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
+      const tooltip = (btn.getAttribute('mattooltip') || btn.getAttribute('title') || '').trim();
+      const iconName = (
+        btn.querySelector('mat-icon, [data-mat-icon-name]')?.getAttribute('data-mat-icon-name') ||
+        btn.querySelector('mat-icon')?.textContent ||
+        ''
+      ).trim();
+
+      const combinedSemantics = `${testId} | ${ariaLabel} | ${tooltip}`;
+
+      // 3. 排除带有“代码 / code / 链接 / link / share”字样的特定复制按钮
+      if (/code|代码|snippet|link|链接|share/i.test(combinedSemantics)) continue;
+
+      // 4. 命中条件：test-id 匹配，或语义标签匹配 Copy/复制，或 Material 图标为 content_copy
+      const isCopyTestId = testId === 'copy-button' || testId === 'action-copy-button';
+      const isCopyLabel =
+        /^(copy|copy response|复制|复制回答|复制内容)$/i.test(ariaLabel) ||
+        /^(copy|copy response|复制|复制回答|复制内容)$/i.test(tooltip);
+      const isCopyIcon = iconName === 'content_copy' && /copy|复制/i.test(combinedSemantics);
+
+      if (isCopyTestId || isCopyLabel || isCopyIcon) {
+        return btn;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * DOM 渐进式兜底提取（仅在局部子树 activeTurnNode 内执行）
+   */
+  function extractDomFallback(activeTurnNode) {
+    if (!activeTurnNode) return '';
+    const markdownContainer =
+      activeTurnNode.querySelector('.markdown, message-content, [class*="markdown-main-panel"]') || activeTurnNode;
+    const domMd = convertDomNodeToMarkdown(markdownContainer);
+    if (domMd && domMd.trim().length > 0) return domMd.trim();
+    return (markdownContainer.innerText || markdownContainer.textContent || '').trim();
+  }
+
+  /**
+   * 零触捕获主流程：ARM 装填 -> 等待 ACK -> 触发原生复制 -> 内存截获回传 -> 失败降级 DOM 提取
+   * @param {HTMLElement} activeTurnNode
+   * @returns {Promise<{ text: string, source: string }>}
+   */
+  async function extractMarkdownZeroTouch(activeTurnNode) {
+    const copyBtn = findResponseCopyButton(activeTurnNode);
+    if (!copyBtn) {
+      return { text: extractDomFallback(activeTurnNode), source: 'DOM_FALLBACK_NO_BTN' };
     }
 
-    // 方案 2：尝试页面自带的复制按钮拦截
-    const copyBtn = findCopyButtonForResponse(responseNode);
-    if (copyBtn) {
-      const beforeClickTime = Date.now();
-      lastCapturedClipboardText = '';
-      copyBtn.click();
-      await sleep(400);
+    const reqId = `argon_clip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-      if (lastCapturedClipboardText && lastCapturedClipboardTime >= beforeClickTime) {
-        return {
-          markdown: lastCapturedClipboardText.trim(),
-          source: 'clipboard-interceptor',
-        };
+    return new Promise((resolve) => {
+      let settled = false;
+
+      const cleanup = () => {
+        window.removeEventListener('message', onMessage);
+        window.postMessage(
+          { source: MSG_SOURCE_CONTENT, type: 'ARGON_CLIPBOARD_DISARM', reqId },
+          window.location.origin
+        );
+      };
+
+      // 兜底总超时（4.2秒，略大于 MAIN World 的 4.0秒自动卸弹）
+      const safetyTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ text: extractDomFallback(activeTurnNode), source: 'DOM_FALLBACK_TIMEOUT' });
+      }, 4200);
+
+      function onMessage(event) {
+        if (event.source !== window || !event.data || event.data.source !== MSG_SOURCE_MAIN) return;
+        if (event.data.reqId !== reqId) return;
+
+        if (event.data.type === 'ARGON_CLIPBOARD_ARM_ACK') {
+          // 收到 MAIN World 装填完毕确认后，立即触发原生复制按钮点击（彻底消除竞态）
+          copyBtn.click();
+        } else if (event.data.type === 'ARGON_CLIPBOARD_CAPTURED') {
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimer);
+          cleanup();
+          resolve({ text: event.data.payload, source: `CLIPBOARD_HOOK (${event.data.method})` });
+        } else if (event.data.type === 'ARGON_CLIPBOARD_TIMEOUT') {
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimer);
+          cleanup();
+          resolve({ text: extractDomFallback(activeTurnNode), source: 'DOM_FALLBACK_HOOK_EXPIRED' });
+        }
       }
 
-      try {
-        const clipText = (await navigator.clipboard.readText()) || '';
-        const trimmedClip = clipText.trim();
-        // 关键校验：排除与用户 Prompt 相同或过短的内容
-        const isNotPrompt = !taskPrompt || !taskPrompt.includes(trimmedClip.slice(0, 50));
-        if (trimmedClip.length > 50 && isNotPrompt) {
-          return {
-            markdown: trimmedClip,
-            source: 'navigator-clipboard',
-          };
-        }
-      } catch (_) {}
+      window.addEventListener('message', onMessage);
+
+      // 发送装填指令
+      window.postMessage(
+        {
+          source: MSG_SOURCE_CONTENT,
+          type: 'ARGON_CLIPBOARD_ARM',
+          reqId,
+        },
+        window.location.origin
+      );
+    });
+  }
+
+  // =========================================================================
+  // 6. 尾节点游标锁定与局部看门狗引擎 (TailScopedWatchdog, 复杂度严格锁死 O(1))
+  // =========================================================================
+  class TailScopedWatchdog {
+    constructor() {
+      this.chatHistorySelector = 'infinite-scroller, [data-test-id="chat-history-container"], main';
+      this.turnTagSelector = 'model-response, .conversation-container, [data-message-author-role="model"]';
     }
 
-    if (domMarkdown && domMarkdown.trim().length > 0) {
+    /**
+     * 步骤 1：在点击 Send 按钮【之前】调用，记录当前对话流的尾锚点快照
+     */
+    createPreSubmitAnchor() {
+      const scroller = document.querySelector(this.chatHistorySelector) || document.body;
+      const allTurns = scroller.querySelectorAll(this.turnTagSelector);
+      const lastTurnBeforeSubmit = allTurns.length > 0 ? allTurns[allTurns.length - 1] : null;
+
+      if (lastTurnBeforeSubmit) {
+        lastTurnBeforeSubmit.setAttribute('data-argon-anchor-tail', 'true');
+      }
+
       return {
-        markdown: domMarkdown.trim(),
-        source: 'dom-markdown-serializer',
+        scroller,
+        lastTurnBeforeSubmit,
+        previousTurnCount: allTurns.length,
+        submitTimestamp: performance.now(),
       };
     }
 
-    return {
-      markdown: (responseNode ? responseNode.innerText : '').trim(),
-      source: 'innerText-fallback',
-    };
+    /**
+     * 步骤 2：点击 Send 后，原子锁定新增的 model-response 节点
+     * 仅观察容器直接子层级变化，一旦捕获立即断开观察器
+     */
+    async lockNewResponseNode(anchor, timeoutMs = 20000) {
+      const { scroller, lastTurnBeforeSubmit } = anchor;
+
+      // 快速路径检查：是否已经同步挂载
+      const findNewNode = () => {
+        if (lastTurnBeforeSubmit && lastTurnBeforeSubmit.isConnected) {
+          // 优先通过兄弟节点链向后顺藤摸瓜 (O(1) 指针跳转，完全不扫全表)
+          let cursor = lastTurnBeforeSubmit.closest('.conversation-container') || lastTurnBeforeSubmit;
+          while (cursor.nextElementSibling) {
+            cursor = cursor.nextElementSibling;
+            if (cursor.matches?.(this.turnTagSelector)) return cursor;
+            const inner = cursor.querySelector?.('model-response');
+            if (inner) return inner;
+          }
+        }
+        // 兜底检查队尾元素是否不等于锚点
+        const currentTurns = scroller.querySelectorAll(this.turnTagSelector);
+        const newest = currentTurns[currentTurns.length - 1];
+        if (newest && newest !== lastTurnBeforeSubmit) {
+          return newest;
+        }
+        return null;
+      };
+
+      const immediateHit = findNewNode();
+      if (immediateHit) return immediateHit;
+
+      // 挂载轻量级观察器捕获新回合节点诞生
+      return new Promise((resolve, reject) => {
+        let observer = null;
+        const timer = setTimeout(() => {
+          if (observer) observer.disconnect();
+          reject(new Error('WATCHDOG_LOCK_TIMEOUT: 未检测到新增回复容器，疑似 Single-Action 点击被吞或被框架拦截'));
+        }, timeoutMs);
+
+        observer = new MutationObserver(() => {
+          const hit = findNewNode();
+          if (hit) {
+            clearTimeout(timer);
+            observer.disconnect(); // 关键：捕获瞬间立即卸载 MutationObserver，杜绝流式吐字期间触发回调风暴！
+            resolve(hit);
+          }
+        });
+
+        observer.observe(scroller, { childList: true, subtree: true });
+      });
+    }
+
+    /**
+     * 步骤 3：在锁定的 activeTurnNode 局部子树内执行 O(1) 看门狗轮询
+     * 包含：流式进度追踪、CoT 思考块遥测锁、以及四重门禁完成态判定
+     */
+    async waitForResponseComplete(activeTurnNode, anchor, options = {}) {
+      const {
+        pollIntervalMs = 350,
+        maxWaitMs = 420000, // 支持 Argon High 深度长文本推理
+        quiescenceTicksRequired = 3, // 连续 3 个 Tick 字数稳定且按钮就绪才算完成
+        onStreamProgress = null,
+      } = options;
+
+      const telemetry = {
+        hasCoTBlock: false,
+        cotDetectedAt: null,
+        firstContentTokenAt: null,
+        totalChars: 0,
+        suspectedSoftDowngrade: false,
+      };
+
+      let lastTextLength = -1;
+      let stableTicks = 0;
+      const startTime = performance.now();
+
+      while (performance.now() - startTime < maxWaitMs) {
+        await sleep(pollIntervalMs);
+
+        // 1. 局部探测 CoT (Thinking Process / 思考过程折叠块) —— 第三把遥测锁
+        if (!telemetry.hasCoTBlock) {
+          const cotNode = activeTurnNode.querySelector(
+            'model-thoughts, [data-test-id*="thought"], .thoughts-container, [aria-label*="Thinking"], [aria-label*="思考"]'
+          );
+          if (
+            cotNode ||
+            /Thinking|思考过程|Show thinking|展示思路/i.test((activeTurnNode.innerText || '').slice(0, 120))
+          ) {
+            telemetry.hasCoTBlock = true;
+            telemetry.cotDetectedAt = Math.round(performance.now() - anchor.submitTimestamp);
+          }
+        }
+
+        // 2. 局部读取当前正文长度 (仅查询局部 markdown 节点，耗时 < 0.2ms，零布局重排)
+        const contentBox =
+          activeTurnNode.querySelector('.markdown, message-content') || activeTurnNode;
+        const currentLength = (contentBox.textContent || '').trim().length;
+
+        if (currentLength > 0 && !telemetry.firstContentTokenAt) {
+          telemetry.firstContentTokenAt = Math.round(performance.now() - anchor.submitTimestamp);
+        }
+
+        if (onStreamProgress && currentLength !== lastTextLength) {
+          onStreamProgress({ chars: currentLength, hasCoT: telemetry.hasCoTBlock });
+        }
+
+        // 3. 完成态四重门禁校验 (Four-Gate Completion Assertion)
+        // 门禁 A：全局输入框区域的 "Stop response / 停止生成" 按钮已消失
+        const stopBtn = document.querySelector(
+          'button[aria-label*="Stop"], button[aria-label*="停止"], [data-test-id="stop-button"], .stop-button'
+        );
+        const isGlobalStopGone = !stopBtn || stopBtn.offsetParent === null || stopBtn.disabled;
+
+        // 门禁 B：局部子树内无 aria-busy 或加载动画正在运行
+        const isLocalBusy =
+          activeTurnNode.getAttribute('aria-busy') === 'true' ||
+          Boolean(activeTurnNode.querySelector('[aria-busy="true"], mat-progress-bar, .loading-indicator'));
+
+        // 门禁 C：局部子树底部的【回复级 Copy 按钮】已挂载并可见
+        const copyBtn = findResponseCopyButton(activeTurnNode);
+        const isCopyButtonReady = Boolean(copyBtn && !copyBtn.disabled);
+
+        // 门禁 D：正文长度进入静默稳定期 (Quiescence)
+        if (currentLength > 0 && currentLength === lastTextLength && isGlobalStopGone && !isLocalBusy && isCopyButtonReady) {
+          stableTicks++;
+        } else {
+          stableTicks = 0;
+        }
+
+        lastTextLength = currentLength;
+        telemetry.totalChars = currentLength;
+
+        if (stableTicks >= quiescenceTicksRequired) {
+          // 判定是否存在服务端静默软降级：若要求 High 深度思考，但无 CoT 块且首包极快 (<1500ms)
+          if (!telemetry.hasCoTBlock && telemetry.firstContentTokenAt && telemetry.firstContentTokenAt < 1500) {
+            telemetry.suspectedSoftDowngrade = true;
+          }
+          return { status: 'COMPLETED', telemetry };
+        }
+      }
+
+      throw new Error('WATCHDOG_STREAM_TIMEOUT: 云端 Argon 响应超时');
+    }
   }
 
   let currentActiveTaskId = null;
@@ -1819,7 +2040,6 @@
   async function handleAskArgonRequest(task) {
     if (isProcessingTask) {
       if (task.requestId && task.requestId === currentActiveTaskId) {
-        // 同一任务重复投递，忽略跳过
         return;
       }
       sendMessageToBackground({
@@ -1860,11 +2080,11 @@
         badgeLabel
       );
 
-      // 1. 将页面上当前已有的所有模型响应标记为 existing，绝对避免读取旧消息
-      getModelResponseElements().forEach((el) => el.setAttribute('data-argon-existing', 'true'));
+      // 1. 发送前记录当前尾锚点快照（Tail-Scoped Anchor O(1)）
+      const watchdog = new TailScopedWatchdog();
+      const anchor = watchdog.createPreSubmitAnchor();
 
-      const queryCountBefore = getUserQueryElements().length;
-
+      // 2. 单动作精准提交 (Single-Action)
       await injectPromptAndSend(task.prompt);
       reportStatus(
         `已发送 [${projectName}] 提问`,
@@ -1872,8 +2092,7 @@
         badgeLabel
       );
 
-      // 核心 1:1 会话隔离升级：提示词刚发出后立即探测 URL 中的新 chatId 并即时向本地回传持久化！
-      // 绝不等数分钟回复结束才绑定，彻底杜绝单项目产生多条冗余会话！
+      // 3. 异步探测与即时绑定 URL 中的新 chatId
       (async () => {
         try {
           const earlyCid = await waitForChatIdInUrl(6000);
@@ -1890,26 +2109,30 @@
         } catch (_) {}
       })();
 
-      // 跟踪本轮提问所生成的最新 user-query 节点
-      const latestUserQueryNode = await waitForNewUserQuery(queryCountBefore, 6000);
+      // 4. 原子锁定新增的 model-response 尾节点 (O(1) 复杂度，完全不扫全表)
+      const latestResponseNode = await watchdog.lockNewResponseNode(anchor, 20000);
 
-      // 开启 HIGH 思考深度后首字延迟增加，超时放宽至 360 秒
-      const latestResponseNode = await waitForGenerationComplete(
-        latestUserQueryNode,
-        projectName,
-        600000
-      );
-      if (latestResponseNode) {
-        latestResponseNode.setAttribute('data-argon-existing', 'true');
-      }
-      reportStatus('生成完毕', '正在提取纯净 Markdown 与会话 ID...', badgeLabel);
+      // 5. 在局部子树内执行高能效看门狗轮询，配合 CoT 遥测锁与四重门禁校验
+      const { status, telemetry } = await watchdog.waitForResponseComplete(latestResponseNode, anchor, {
+        maxWaitMs: 420000,
+        onStreamProgress: ({ chars, hasCoT }) => {
+          reportStatus(
+            hasCoT ? `Argon 正在深度思考 [${projectName}]` : `正在接收 [${projectName}] 回复...`,
+            `已生成约 ${chars} 字符${hasCoT ? ' (CoT 思考块已激活)' : ''}`,
+            badgeLabel
+          );
+        },
+      });
 
-      const { markdown, source } = await extractCleanMarkdown(latestResponseNode, task.prompt);
+      reportStatus('生成完毕', '正在通过内存零触劫持提取 Markdown...', badgeLabel);
+
+      // 6. 内存级零触提取 (Zero-Touch Clipboard Interception)
+      const { text: markdown, source } = await extractMarkdownZeroTouch(latestResponseNode);
       if (!markdown) {
         throw new Error('提取到的回复内容为空。');
       }
 
-      // 捕获当前会话的 chatId（特别是新项目首轮对话刚分配的 URL）
+      // 捕获当前会话的 chatId
       const finalChatId = (await waitForChatIdInUrl(3500)) || task.chatId || null;
       const finalChatUrl = finalChatId
         ? `https://gemini.google.com/app/${finalChatId}`
@@ -1930,6 +2153,7 @@
         thinkingLevel: thinkingStatusTag,
         markdown,
         source,
+        telemetry,
         timestamp: Date.now(),
       });
 

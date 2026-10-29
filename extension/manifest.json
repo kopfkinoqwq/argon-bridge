@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v2.3.6 (High-Thinking Dual-Lock)",
-  "version": "2.3.6",
-  "description": "Argon Bridge v2.3.6: Single-action anti-duplication submission, precision High-Thinking dual-lock, and active zombie watchdog",
+  "name": "Argon Bridge v2.4.0 (Zero-Touch Clipboard & Tail Watchdog)",
+  "version": "2.4.0",
+  "description": "Argon Bridge v2.4.0: MAIN World zero-touch clipboard interception, O(1) tail-scoped watchdog, and daemon multiplexer",
   "permissions": [
     "tabs",
     "scripting",
@@ -25,9 +25,20 @@
         "https://gemini.google.com/*"
       ],
       "js": [
+        "page_hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     }
   ]
 }

@@ -1,20 +1,27 @@
 #!/usr/bin/env node
 /**
- * argon-bridge v2.3.6: Local CLI & Project-to-Chat 1:1 Session Manager
- * Port: 17420 (127.0.0.1)
+ * argon-bridge v2.4.0: Single-File Dual-Role Architecture
+ * Role A: Background Daemon Multiplexer (Port 17420, MV3 SW Keep-Alive, FIFO Queue)
+ * Role B: Thin CLI Client (Self-Bootstrapping, Zero Port Collision, Multi-Terminal Safe)
  */
 
+'use strict';
+
+const http = require('http');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
-const { WebSocketServer } = require('ws');
+const { spawn } = require('child_process');
+const { WebSocketServer, WebSocket } = require('ws');
 
 const DEFAULT_PORT = 17420;
-const DEFAULT_TIMEOUT_MS = 420000; // 7 minutes (supports deep reasoning and TTFT delay)
+const HOST = '127.0.0.1';
+const DAEMON_FLAG = '--argon-daemon';
+const GLOBAL_DIR = path.join(os.homedir(), '.argon-bridge');
+const SESSIONS_FILE = path.join(GLOBAL_DIR, 'sessions.json');
 const LOCAL_CONFIG_FILENAME = '.argon.json';
-const GLOBAL_REGISTRY_DIR = path.join(os.homedir(), '.argon-bridge');
-const GLOBAL_REGISTRY_FILE = path.join(GLOBAL_REGISTRY_DIR, 'sessions.json');
+const DAEMON_IDLE_EXIT_MS = 30 * 60 * 1000; // 30分钟无请求自动优雅退出
 
 function logInfo(msg) {
   process.stderr.write(`\x1b[36m[Argon-Bridge]\x1b[0m ${msg}\n`);
@@ -32,6 +39,9 @@ function logError(msg) {
   process.stderr.write(`\x1b[31m[Argon-Bridge Error]\x1b[0m ${msg}\n`);
 }
 
+// ============================================================================
+// 工具函数：原子写盘与多项目会话映射
+// ============================================================================
 function normalizeChatId(input) {
   if (!input || typeof input !== 'string') return null;
   const trimmed = input.trim();
@@ -49,29 +59,26 @@ function buildChatUrl(chatId) {
   return chatId ? `https://gemini.google.com/app/${chatId}` : 'https://gemini.google.com/app';
 }
 
+function atomicWriteJson(filePath, dataObj) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const tmpFile = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(dataObj, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmpFile, filePath); // POSIX/NTFS 原子替换，杜绝并发写坏
+}
+
 function loadGlobalRegistry() {
+  if (!fs.existsSync(SESSIONS_FILE)) return { projects: {} };
   try {
-    if (fs.existsSync(GLOBAL_REGISTRY_FILE)) {
-      return JSON.parse(fs.readFileSync(GLOBAL_REGISTRY_FILE, 'utf8'));
-    }
-  } catch (err) {
-    logWarn(`读取全局会话注册表失败，将重新初始化: ${err.message}`);
-  }
-  return { projects: {} };
-}
-
-function saveGlobalRegistry(registry) {
-  try {
-    if (!fs.existsSync(GLOBAL_REGISTRY_DIR)) {
-      fs.mkdirSync(GLOBAL_REGISTRY_DIR, { recursive: true });
-    }
-    fs.writeFileSync(GLOBAL_REGISTRY_FILE, JSON.stringify(registry, null, 2) + '\n', 'utf8');
-  } catch (err) {
-    logWarn(`写入全局会话注册表失败: ${err.message}`);
+    const parsed = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    if (!parsed.projects) parsed.projects = {};
+    return parsed;
+  } catch (_) {
+    return { projects: {} };
   }
 }
 
-function detectProjectContext(options) {
+function detectProjectContext(options = {}) {
   const workDir = path.resolve(options.cwd || process.cwd());
   const localConfigPath = path.join(workDir, LOCAL_CONFIG_FILENAME);
 
@@ -82,7 +89,6 @@ function detectProjectContext(options) {
     } catch (_) {}
   }
 
-  // 决定项目名称：CLI --project > .argon.json > package.json name > 目录名
   let projectName = options.project;
   if (!projectName && localConfig && localConfig.projectName) {
     projectName = localConfig.projectName;
@@ -100,7 +106,6 @@ function detectProjectContext(options) {
     projectName = path.basename(workDir) || 'default-project';
   }
 
-  // 生成唯一 Project Key（若显式传入 --project 则按名称索引，否则结合路径哈希防重名）
   const pathHash = crypto.createHash('sha1').update(workDir).digest('hex').slice(0, 8);
   const projectKey = options.project
     ? `proj:${options.project}`
@@ -133,7 +138,7 @@ function detectProjectContext(options) {
 
 function persistProjectSession(ctx, chatId, chatUrl) {
   const cleanId = normalizeChatId(chatId) || normalizeChatId(chatUrl);
-  if (!cleanId) return false;
+  if (!cleanId) return null;
 
   const finalUrl = buildChatUrl(cleanId);
   const nowIso = new Date().toISOString();
@@ -147,17 +152,15 @@ function persistProjectSession(ctx, chatId, chatUrl) {
     updatedAt: nowIso,
   };
 
-  // 1. 写入项目根目录下的 .argon.json
   try {
-    fs.writeFileSync(ctx.localConfigPath, JSON.stringify(record, null, 2) + '\n', 'utf8');
+    atomicWriteJson(ctx.localConfigPath, record);
   } catch (err) {
     logWarn(`无法写入项目本地配置 ${ctx.localConfigPath}: ${err.message}`);
   }
 
-  // 2. 写入全局 ~/.argon-bridge/sessions.json
   const registry = loadGlobalRegistry();
   registry.projects[ctx.projectKey] = record;
-  saveGlobalRegistry(registry);
+  atomicWriteJson(SESSIONS_FILE, registry);
 
   return record;
 }
@@ -169,7 +172,7 @@ function printSessionList() {
     logInfo('当前尚无已绑定的项目会话记录。');
     return;
   }
-  process.stderr.write('\n\x1b[1m=== Argon Bridge 已绑定项目会话列表 (1:1 Mapping) ===\x1b[0m\n');
+  process.stderr.write('\n\x1b[1m=== Argon Bridge 已绑定项目专属会话列表 (1:1 Mapping) ===\x1b[0m\n');
   for (const item of entries) {
     process.stderr.write(
       `- \x1b[32m${item.projectName}\x1b[0m (${item.projectKey})\n` +
@@ -181,33 +184,259 @@ function printSessionList() {
   process.stderr.write('\n');
 }
 
-function printHelp() {
-  process.stderr.write(`
-用法:
-  node ask_argon.js "提问内容"
-  node ask_argon.js --file <prompt.md> [--out <PLAN.md>] [--project <name>] [--cwd <dir>]
-  node ask_argon.js --new-chat "开启当前项目的全新专属对话"
-  node ask_argon.js --bind <chatUrl_or_chatId> [--project <name>] [--cwd <dir>]
-  node ask_argon.js --list
+// ============================================================================
+// 角色 A：常驻守护进程 (Daemon Multiplexer)
+// ============================================================================
+function startDaemonServer(port = DEFAULT_PORT) {
+  let activeExtensionWs = null;
+  const pendingRpcMap = new Map(); // reqId -> { resolve, reject, timer, payload }
+  const executionQueue = [];       // 全局串行执行队列 (FIFO)
+  let isProcessingQueue = false;
+  let idleTimer = null;
 
-核心参数说明 (v2.0 多项目会话路由):
-  --project, -P   指定项目名称（默认自动读取当前目录 .argon.json 或 package.json）
-  --cwd, -C       指定目标项目根目录路径（默认当前工作目录 process.cwd()）
-  --new-chat, -N  强制为当前项目创建新的 Gemini 会话并更新绑定
-  --model, -m     指定目标模型名称（默认 Argon，自动锁定高阶架构师模型）
-  --thinking      指定推理程度/思考深度（high | medium | low，默认 high）
-  --chat-id       临时或显式指定要路由到的 Gemini Chat ID / URL
-  --bind          将当前项目手动绑定到指定的 Gemini Chat URL 或 Chat ID
-  --list, -l      列出全局所有已绑定的项目与专属 Gemini 会话映射
-  --file, -f      从指定文件读取提问内容
-  --out, -o       将 Argon 的回复写入指定文件（如 PLAN.md）
-  --timeout, -t   超时时间（毫秒，默认 420000 即 7 分钟）
-  --port, -p      本地 WebSocket 监听端口（默认 17420）
-  --help, -h      显示本帮助信息
-`);
+  function resetIdleTimer() {
+    if (!DAEMON_IDLE_EXIT_MS) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (executionQueue.length === 0 && pendingRpcMap.size === 0) {
+        process.exit(0);
+      }
+    }, DAEMON_IDLE_EXIT_MS);
+  }
+
+  async function drainQueue() {
+    if (isProcessingQueue || executionQueue.length === 0) return;
+    isProcessingQueue = true;
+
+    while (executionQueue.length > 0) {
+      const job = executionQueue.shift();
+      try {
+        const result = await dispatchToExtension(job.payload);
+        if (result && result.chatId) {
+          const ctx = {
+            projectKey: job.payload.projectKey,
+            projectName: job.payload.projectName,
+            workDir: job.payload.projectPath,
+            localConfigPath: path.join(job.payload.projectPath, LOCAL_CONFIG_FILENAME),
+          };
+          persistProjectSession(ctx, result.chatId, result.chatUrl);
+        }
+        job.resolve(result);
+      } catch (err) {
+        job.reject(err);
+      }
+    }
+
+    isProcessingQueue = false;
+    resetIdleTimer();
+  }
+
+  async function dispatchToExtension(payload, waitConnectMs = 25000) {
+    const startWait = Date.now();
+    while (!activeExtensionWs || activeExtensionWs.readyState !== WebSocket.OPEN) {
+      if (Date.now() - startWait > waitConnectMs) {
+        throw new Error('DAEMON_NO_EXTENSION: Chrome MV3 插件未连接，请确认浏览器已开启并登录 Gemini 网页版');
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const { requestId, timeoutMs = 420000 } = payload;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingRpcMap.delete(requestId);
+        reject(new Error(`DAEMON_RPC_TIMEOUT: 请求 ${requestId} 超过 ${timeoutMs / 1000}s 未响应`));
+      }, timeoutMs);
+
+      pendingRpcMap.set(requestId, { resolve, reject, timer, payload });
+
+      activeExtensionWs.send(
+        JSON.stringify({
+          type: 'ASK_ARGON',
+          ...payload,
+        })
+      );
+    });
+  }
+
+  const server = http.createServer((req, res) => {
+    resetIdleTimer();
+
+    if (req.method === 'GET' && req.url === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          status: 'ok',
+          daemonPid: process.pid,
+          extensionConnected: Boolean(activeExtensionWs && activeExtensionWs.readyState === WebSocket.OPEN),
+          queueLength: executionQueue.length,
+          busy: isProcessingQueue,
+        })
+      );
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/ask') {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        let payload;
+        try {
+          payload = JSON.parse(body);
+        } catch (_) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'INVALID_JSON' }));
+          return;
+        }
+
+        executionQueue.push({
+          payload,
+          resolve: (result) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, data: result }));
+          },
+          reject: (err) => {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+          },
+        });
+
+        drainQueue();
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  const wss = new WebSocketServer({ server });
+
+  wss.on('connection', (ws) => {
+    activeExtensionWs = ws;
+
+    // 核心心跳：每 20 秒发送心跳帧，彻底阻断 Chrome MV3 Service Worker 的 30 秒空闲挂起！
+    const keepAliveInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.ping();
+        try {
+          ws.send(JSON.stringify({ type: 'DAEMON_HEARTBEAT', ts: Date.now() }));
+        } catch (_) {}
+      }
+    }, 20000);
+
+    ws.on('message', (rawData) => {
+      let msg;
+      try {
+        msg = JSON.parse(rawData.toString('utf8'));
+      } catch (_) {
+        return;
+      }
+
+      if (msg.type === 'SESSION_BOUND') {
+        const item = pendingRpcMap.get(msg.requestId);
+        if (item) {
+          const ctx = {
+            projectKey: item.payload.projectKey,
+            projectName: item.payload.projectName,
+            workDir: item.payload.projectPath,
+            localConfigPath: path.join(item.payload.projectPath, LOCAL_CONFIG_FILENAME),
+          };
+          persistProjectSession(ctx, msg.chatId, msg.chatUrl);
+        }
+        return;
+      }
+
+      if (msg.type === 'STATUS') {
+        process.stderr.write(`\x1b[36m[浏览器状态]\x1b[0m ${msg.status}${msg.detail ? ' - ' + msg.detail : ''}\n`);
+        return;
+      }
+
+      if (msg.type === 'RESPONSE' && msg.requestId && pendingRpcMap.has(msg.requestId)) {
+        const { resolve, timer } = pendingRpcMap.get(msg.requestId);
+        clearTimeout(timer);
+        pendingRpcMap.delete(msg.requestId);
+        resolve(msg);
+        return;
+      }
+
+      if (msg.type === 'ERROR' && msg.requestId && pendingRpcMap.has(msg.requestId)) {
+        const { reject, timer } = pendingRpcMap.get(msg.requestId);
+        clearTimeout(timer);
+        pendingRpcMap.delete(msg.requestId);
+        reject(new Error(msg.error || '未知浏览器端异常'));
+        return;
+      }
+    });
+
+    ws.on('close', () => {
+      clearInterval(keepAliveInterval);
+      if (activeExtensionWs === ws) activeExtensionWs = null;
+    });
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      process.exit(0); // 端口冲突静默退出
+    }
+    process.exit(1);
+  });
+
+  server.listen(port, HOST, () => {
+    resetIdleTimer();
+  });
 }
 
-function parseArgs(argv) {
+// ============================================================================
+// 角色 B：薄客户端 CLI (自举提拔 Daemon，发送请求并收集结果)
+// ============================================================================
+function checkDaemonHealth(port = DEFAULT_PORT) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://${HOST}:${port}/api/health`, { timeout: 400 }, (res) => {
+      let data = '';
+      res.on('data', (c) => {
+        data += c;
+      });
+      res.on('end', () => {
+        try {
+          resolve(res.statusCode === 200 ? JSON.parse(data) : null);
+        } catch (_) {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function ensureDaemonRunning(port = DEFAULT_PORT) {
+  let health = await checkDaemonHealth(port);
+  if (health) return health;
+
+  // 未运行守护进程：自动派生后台解耦进程
+  const child = spawn(process.execPath, [__filename, DAEMON_FLAG, '--port', String(port)], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+
+  for (let i = 0; i < 35; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    health = await checkDaemonHealth(port);
+    if (health) return health;
+  }
+
+  throw new Error(`无法在端口 ${port} 拉起 argon-bridge 守护进程`);
+}
+
+function parseCliArgs(argv) {
   const args = argv.slice(2);
   const config = {
     prompt: '',
@@ -217,18 +446,15 @@ function parseArgs(argv) {
     cwd: null,
     chatId: null,
     newChat: false,
-    reload: false,
     model: 'Argon',
     thinkingLevel: 'high',
     bindTarget: null,
     listOnly: false,
-    getLatest: false,
     port: DEFAULT_PORT,
-    timeoutMs: DEFAULT_TIMEOUT_MS,
+    timeoutMs: 420000,
   };
 
   const positional = [];
-
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--file' || arg === '-f') {
@@ -247,10 +473,6 @@ function parseArgs(argv) {
       config.chatId = args[++i];
     } else if (arg === '--new-chat' || arg === '-N' || arg === '--reset') {
       config.newChat = true;
-    } else if (arg === '--reload' || arg === '-r') {
-      config.reload = true;
-    } else if (arg === '--latest' || arg === '--fetch' || arg === '-L') {
-      config.getLatest = true;
     } else if (arg === '--bind') {
       config.bindTarget = args[++i];
     } else if (arg === '--list' || arg === '-l' || arg === '--list-sessions') {
@@ -258,17 +480,12 @@ function parseArgs(argv) {
     } else if (arg === '--port' || arg === '-p') {
       config.port = parseInt(args[++i], 10) || DEFAULT_PORT;
     } else if (arg === '--timeout' || arg === '-t') {
-      config.timeoutMs = parseInt(args[++i], 10) || DEFAULT_TIMEOUT_MS;
-    } else if (arg === '--help' || arg === '-h') {
-      printHelp();
-      process.exit(0);
+      config.timeoutMs = parseInt(args[++i], 10) || 420000;
+    } else if (arg === DAEMON_FLAG) {
+      // 内部标志
     } else {
       positional.push(arg);
     }
-  }
-
-  if (config.listOnly || config.bindTarget) {
-    return config;
   }
 
   if (config.filePath) {
@@ -276,26 +493,18 @@ function parseArgs(argv) {
     const resolvedFile = path.isAbsolute(config.filePath)
       ? config.filePath
       : path.resolve(baseDir, config.filePath);
-    if (!fs.existsSync(resolvedFile)) {
-      logError(`找不到指定的输入文件: ${resolvedFile}`);
-      process.exit(1);
+    if (fs.existsSync(resolvedFile)) {
+      config.prompt = fs.readFileSync(resolvedFile, 'utf8').trim();
     }
-    config.prompt = fs.readFileSync(resolvedFile, 'utf8').trim();
   } else if (positional.length > 0) {
     config.prompt = positional.join(' ').trim();
-  }
-
-  if (!config.prompt && !config.getLatest) {
-    logError('提问内容不能为空。请提供提问字符串或使用 --file <path> 指定文件，或使用 --latest 提取最新回复。');
-    printHelp();
-    process.exit(1);
   }
 
   return config;
 }
 
-function main() {
-  const config = parseArgs(process.argv);
+async function runCliClient() {
+  const config = parseCliArgs(process.argv);
 
   if (config.listOnly) {
     printSessionList();
@@ -310,201 +519,134 @@ function main() {
       logError(`无效的 Chat URL 或 Chat ID: ${config.bindTarget}`);
       process.exit(1);
     }
-    logSuccess(`已将项目 [${projectCtx.projectName}] 手动绑定至会话: ${saved.chatUrl}`);
-    logInfo(`本地配置文件已更新: ${projectCtx.localConfigPath}`);
+    logSuccess(`已将项目 [${projectCtx.projectName}] 绑定至专属会话: ${saved.chatUrl}`);
     process.exit(0);
   }
 
-  // 如果是新项目首次会话，自动注入轻量级项目身份头，帮助 Gemini 4 Argon 建立专属记忆
+  if (!config.prompt) {
+    process.stderr.write(`\n用法: node ask_argon.js "你的提问内容" [--out PLAN.md] [--new-chat]\n`);
+    process.exit(1);
+  }
+
+  // 1. 确保常驻 Daemon 正在运行
+  await ensureDaemonRunning(config.port);
+
+  // 2. 播报双脑协同横幅
+  process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
+  process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.4.0)... │\x1b[0m\n`);
+  process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
+  logInfo(
+    `当前项目: [${projectCtx.projectName}] | 路由模式: ${
+      projectCtx.isNewChat ? '新建专属会话 (New Chat)' : `定向切流 -> ${projectCtx.chatUrl}`
+    }`
+  );
+
+  const requestId = crypto.randomUUID();
   const effectivePrompt = projectCtx.isNewChat
     ? `[Argon-Bridge Project Session Init | Project: ${projectCtx.projectName} | Path: ${projectCtx.workDir}]\n\n${config.prompt}`
     : config.prompt;
 
-  const requestId = crypto.randomUUID();
-  let promptDispatched = false;
-  let isCompleted = false;
-
-  const wss = new WebSocketServer({
-    host: '127.0.0.1',
-    port: config.port,
+  const payload = JSON.stringify({
+    requestId,
+    projectKey: projectCtx.projectKey,
+    projectName: projectCtx.projectName,
+    projectPath: projectCtx.workDir,
+    chatId: projectCtx.chatId,
+    chatUrl: projectCtx.chatUrl,
+    forceNewChat: projectCtx.isNewChat,
+    model: config.model || 'Argon',
+    thinkingLevel: config.thinkingLevel || 'high',
+    prompt: effectivePrompt,
+    timeoutMs: config.timeoutMs,
   });
 
-  const timeoutHandle = setTimeout(() => {
-    if (!isCompleted) {
-      logError(`等待超时 (${config.timeoutMs / 1000}s)。请确认 Chrome 插件已启用且已登录 https://gemini.google.com`);
-      cleanupAndExit(1);
-    }
-  }, config.timeoutMs);
-
-  function cleanupAndExit(code) {
-    isCompleted = true;
-    clearTimeout(timeoutHandle);
-    try {
-      for (const client of wss.clients) {
-        try {
-          client.close();
-        } catch (_) {}
+  // 3. 向 Daemon 发起 HTTP POST 请求并挂起等待结果
+  const responseData = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: HOST,
+        port: config.port,
+        path: '/api/ask',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: config.timeoutMs + 5000,
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch (_) {
+            reject(new Error(`Daemon 响应解析失败: ${raw}`));
+          }
+        });
       }
-      wss.close(() => {
-        process.exit(code);
-      });
-      setTimeout(() => process.exit(code), 300);
-    } catch (_) {
-      process.exit(code);
-    }
+    );
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('CLI 等待 Daemon 调度超时'));
+    });
+
+    req.write(payload);
+    req.end();
+  });
+
+  if (!responseData.ok) {
+    logError(`执行失败: ${responseData.error}`);
+    process.exit(2);
   }
 
-  wss.on('listening', () => {
-    process.stderr.write(`\n\x1b[1;35m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
-    process.stderr.write(`\x1b[1;35m│  🧠 双脑协同：正在连线云端首席架构师 Gemini 4 Argon (v2.3.6)... │\x1b[0m\n`);
-    process.stderr.write(`\x1b[1;35m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
-    logInfo(`本地 WebSocket 服务已启动: ws://127.0.0.1:${config.port}`);
-    logInfo(
-      `当前项目: [${projectCtx.projectName}] | 路由模式: ${
-        projectCtx.isNewChat
-          ? '新建专属会话 (New Chat)'
-          : `定向切流 -> ${projectCtx.chatUrl}`
-      }`
-    );
-    logInfo(`等待 Chrome 插件连接并执行会话路由...`);
-  });
+  const result = responseData.data;
+  const markdown = (result.markdown || '').trim();
+  const source = result.source || 'zero-touch-hook';
+  const modelLabel = result.model || 'Argon';
+  const thinkingLabel = result.thinkingLevel || 'HIGH';
 
-  wss.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      logError(`端口 ${config.port} 已被占用，请等待上一个 ask_argon.js 任务完成。`);
-    } else {
-      logError(`WebSocket Server 异常: ${err.message}`);
-    }
-    cleanupAndExit(1);
-  });
+  process.stderr.write(`\n\x1b[1;32m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
+  process.stderr.write(`\x1b[1;32m│  🏛️ 架构师蓝图已送达：云端 Gemini 4 Argon 输出完毕！          │\x1b[0m\n`);
+  process.stderr.write(`\x1b[1;32m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
 
-  wss.on('connection', (ws) => {
-    logSuccess('Chrome 插件已连接！正在下发项目路由与提问指令...');
+  logSuccess(
+    `已收到 [${projectCtx.projectName}] 专属会话回复！(模型: ${modelLabel}, 深度思考: ${thinkingLabel}, 提取: ${source}, 长度: ${markdown.length} 字符)`
+  );
 
-    function sendPromptToExtension() {
-      if (promptDispatched || isCompleted) return;
-      promptDispatched = true;
-      ws.send(
-        JSON.stringify({
-          type: config.getLatest ? 'GET_LATEST_RESPONSE' : 'ASK_ARGON',
-          requestId,
-          projectKey: projectCtx.projectKey,
-          projectName: projectCtx.projectName,
-          projectPath: projectCtx.workDir,
-          chatId: projectCtx.chatId,
-          chatUrl: projectCtx.chatUrl,
-          forceNewChat: projectCtx.isNewChat,
-          reload: Boolean(config.reload),
-          model: config.model || 'Argon',
-          thinkingLevel: config.thinkingLevel || 'high',
-          prompt: effectivePrompt || '',
-          timestamp: Date.now(),
-        })
-      );
-    }
+  // 4. 服务端静默软降级遥测警告（第三把锁）
+  if (result.telemetry && result.telemetry.suspectedSoftDowngrade) {
+    logWarn('⚠️ [WARN: DEGRADED_SUSPECTED] 未检测到 CoT 思考块且首包过快 (<1.5s)，疑似云端服务端发生静默降级！');
+  }
 
-    const dispatchTimer = setTimeout(() => {
-      sendPromptToExtension();
-    }, 250);
+  // 5. 若指定了 --out 输出文件，落盘写入
+  if (config.outPath) {
+    const baseDir = config.cwd ? path.resolve(config.cwd) : process.cwd();
+    const resolvedOut = path.isAbsolute(config.outPath)
+      ? config.outPath
+      : path.resolve(baseDir, config.outPath);
+    fs.writeFileSync(resolvedOut, markdown + '\n', 'utf8');
+    logSuccess(`回复已成功写入文件: ${resolvedOut}`);
+  }
 
-    ws.on('message', (rawData) => {
-      let msg;
-      try {
-        msg = JSON.parse(rawData.toString('utf8'));
-      } catch (_) {
-        return;
-      }
-
-      if (msg.type === 'HELLO') {
-        clearTimeout(dispatchTimer);
-        sendPromptToExtension();
-        return;
-      }
-
-      if (msg.type === 'STATUS') {
-        logInfo(`[浏览器路由状态] ${msg.status}${msg.detail ? ' - ' + msg.detail : ''}`);
-        return;
-      }
-
-      if (msg.type === 'SESSION_BOUND') {
-        const returnedChatId = normalizeChatId(msg.chatId) || normalizeChatId(msg.chatUrl);
-        if (returnedChatId) {
-          const savedRecord = persistProjectSession(projectCtx, returnedChatId, msg.chatUrl);
-          if (savedRecord) {
-            logSuccess(`[会话即时绑定] 项目 [${projectCtx.projectName}] 已成功锁定专属会话: ${savedRecord.chatUrl}`);
-          }
-        }
-        return;
-      }
-
-      if (msg.type === 'ERROR') {
-        logError(`浏览器端执行失败: ${msg.error || '未知错误'}`);
-        cleanupAndExit(1);
-        return;
-      }
-
-      if (msg.type === 'RESPONSE') {
-        if (isCompleted) return;
-        isCompleted = true;
-
-        const markdown = (msg.markdown || '').trim();
-        const source = msg.source || 'unknown';
-        const returnedChatId = normalizeChatId(msg.chatId) || normalizeChatId(msg.chatUrl);
-
-        process.stderr.write(`\n\x1b[1;32m╭──────────────────────────────────────────────────────────────╮\x1b[0m\n`);
-        process.stderr.write(`\x1b[1;32m│  🏛️ 架构师蓝图已送达：云端 Gemini 4 Argon 输出完毕！          │\x1b[0m\n`);
-        process.stderr.write(`\x1b[1;32m╰──────────────────────────────────────────────────────────────╯\x1b[0m\n\n`);
-
-        const modelLabel = msg.model || 'Argon';
-        const thinkingLabel = msg.thinkingLevel || 'HIGH';
-        logSuccess(`已收到 [${projectCtx.projectName}] 专属会话回复！(模型: ${modelLabel}, 深度思考: ${thinkingLabel}, 提取: ${source}, 长度: ${markdown.length} 字符)`);
-
-        // 持久化保存或更新当前项目绑定的 chatId
-        if (returnedChatId) {
-          const savedRecord = persistProjectSession(projectCtx, returnedChatId, msg.chatUrl);
-          if (savedRecord && (projectCtx.isNewChat || projectCtx.chatId !== savedRecord.chatId)) {
-            logSuccess(
-              `已自动绑定项目 [${projectCtx.projectName}] <-> 专属会话: ${savedRecord.chatUrl}`
-            );
-            logInfo(`会话映射已写入: ${projectCtx.localConfigPath}`);
-          }
-        } else {
-          logWarn('未能从当前页面 URL 中解析出具体的 chatId，下次提问将继续尝试提取。');
-        }
-
-        try {
-          ws.send(JSON.stringify({ type: 'ACK', requestId }));
-        } catch (_) {}
-
-        if (config.outPath) {
-          const baseDir = config.cwd ? path.resolve(config.cwd) : process.cwd();
-          const resolvedOut = path.isAbsolute(config.outPath)
-            ? config.outPath
-            : path.resolve(baseDir, config.outPath);
-          fs.writeFileSync(resolvedOut, markdown + '\n', 'utf8');
-          logSuccess(`回复已成功写入文件: ${resolvedOut}`);
-        }
-
-        process.stdout.write(markdown + '\n');
-        cleanupAndExit(0);
-      }
-    });
-
-    ws.on('close', () => {
-      if (!isCompleted) {
-        logWarn('Chrome 插件连接暂时断开，等待重连与响应回传...');
-      }
-    });
-  });
-
-  process.on('SIGINT', () => {
-    logWarn('收到中断信号 (SIGINT)，正在关闭本地桥接服务...');
-    cleanupAndExit(130);
-  });
-
-  process.on('SIGTERM', () => {
-    cleanupAndExit(143);
-  });
+  // 6. 标准输出纯净 Markdown 供上层工具消费
+  process.stdout.write(markdown + '\n');
 }
 
-main();
+// ============================================================================
+// 主入口分流器
+// ============================================================================
+if (process.argv.includes(DAEMON_FLAG)) {
+  const portIndex = process.argv.indexOf('--port');
+  const port = portIndex !== -1 ? parseInt(process.argv[portIndex + 1], 10) || DEFAULT_PORT : DEFAULT_PORT;
+  startDaemonServer(port);
+} else {
+  runCliClient().catch((err) => {
+    logError(err.message || String(err));
+    process.exit(1);
+  });
+}

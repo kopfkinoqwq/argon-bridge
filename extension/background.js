@@ -108,6 +108,13 @@ function connectWebSocket(force = false) {
         return;
       }
 
+      if (data.type === 'DAEMON_HEARTBEAT') {
+        try {
+          socket.send(JSON.stringify({ type: 'HEARTBEAT_ACK', ts: Date.now() }));
+        } catch (_) {}
+        return;
+      }
+
       if (data.type === 'ASK_ARGON') {
         await routeAndExecuteTask(data);
       } else if (data.type === 'GET_LATEST_RESPONSE') {
