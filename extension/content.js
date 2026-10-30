@@ -1,11 +1,12 @@
 /**
- * Argon Bridge v3.1.1 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v3.2.0 - Content Script for https://gemini.google.com/*
  * Full-Duplex Autonomous Agent Bus, Zero-Touch Clipboard, O(1) Watchdog & Entropy Guard
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
  * 2. Automatic waiting for rich-textarea readiness after session switching
  * 3. In-page "New Chat" trigger if needed + URL Chat ID harvesting (/app/<chatId>)
  * 4. Dual-engine clean Markdown extraction (Clipboard hook + DOM serializer)
+ * 5. Angular CDK / Material 3 工业级零死角双锁 (Argon + High) 与五级浮层清退引擎
  */
 
 (function () {
@@ -168,7 +169,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v3.1.1</span>
+            <span class="version-badge">v3.2.0</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -508,19 +509,27 @@
     }
   }
 
-  // =========================================================================
-  // 4. 智能模型与思考深度双重锁定引擎 (v3.1 - 专治 CDK 二级子菜单与浮层残留)
+    // =========================================================================
+  // 4. Google Gemini (Angular CDK / Material Menu) 工业级零死角菜单控制与双锁引擎 (v3.2.0)
+  //    依据首席架构师审查报告：宿主定位收敛 + 拟真事件流 + 状态双重校验 + 五级递进式浮层彻底清退
   // =========================================================================
   const DEFAULT_TARGET_MODEL_KEYWORDS = ['argon', '4 argon', 'gemini 4', 'pro', 'advanced', 'deep think'];
 
+  /**
+   * 1. 基础可见性与几何校验（依据 Argon 规范，严防 0 尺寸/不可见元素）
+   */
   function isVisible(el) {
-    if (!el || !(el instanceof Element)) return false;
+    if (!el || !(el instanceof Element) || !el.isConnected) return false;
     const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      parseFloat(style.opacity || '1') < 0.05
+    ) {
       return false;
     }
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    return rect.width > 2 && rect.height > 2;
   }
 
   /**
@@ -545,130 +554,326 @@
   }
 
   /**
-   * 模拟鼠标悬停（用于触发 Angular Material matMenuTriggerFor 二级子菜单展开）
+   * 2. 向上收敛至真正的交互宿主 (杜绝命中内部 span/div 或外层 menu 容器)
    */
-  function simulateHover(el) {
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const clientX = rect.left + rect.width / 2;
-    const clientY = rect.top + rect.height / 2;
-    const opts = { bubbles: true, cancelable: true, view: window, clientX, clientY };
-    el.dispatchEvent(new PointerEvent('pointerenter', opts));
-    el.dispatchEvent(new MouseEvent('mouseenter', opts));
-    el.dispatchEvent(new PointerEvent('pointermove', opts));
-    el.dispatchEvent(new MouseEvent('mousemove', opts));
-    el.dispatchEvent(new MouseEvent('mouseover', opts));
+  const INTERACTIVE_ITEM_HOST_SELECTOR = [
+    'button[role="menuitemradio"]',
+    'button[role="menuitemcheckbox"]',
+    'button[role="menuitem"]',
+    '[role="menuitemradio"]',
+    '[role="menuitemcheckbox"]',
+    '[role="menuitem"]',
+    '[role="option"]',
+    'button.mat-mdc-menu-item',
+    'button.mat-menu-item',
+    'mat-option',
+    '[cdkMenuItem]',
+    '[cdkMenuItemRadio]'
+  ].join(', ');
+
+  function resolveMenuItemHost(el) {
+    if (!el || !(el instanceof Element)) return null;
+    const closestHost = el.closest(INTERACTIVE_ITEM_HOST_SELECTOR);
+    if (closestHost) return closestHost;
+
+    if (el.getAttribute('role') === 'menu' || el.classList.contains('cdk-overlay-pane')) {
+      return null;
+    }
+    return el.closest('button, [tabindex]') || el;
   }
 
   /**
-   * 模拟真实物理点击（含中心坐标计算，兼容 Angular CDK PointerEvent & MouseEvent）
+   * 3. 精准判定菜单项是否已被选中
+   *    - 注意：Angular Material 常在每个 radio 项内都渲染 <mat-icon>check</mat-icon>，
+   *      未选中项仅通过 CSS opacity: 0 或 visibility: hidden 隐藏，必须校验图标真实可见性！
    */
-  function simulateRealClick(el) {
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const clientX = rect.left + Math.max(2, rect.width / 2);
-    const clientY = rect.top + Math.max(2, rect.height / 2);
-    const downOpts = {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX,
-      clientY,
-      button: 0,
-      buttons: 1,
-    };
-    const upOpts = {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX,
-      clientY,
-      button: 0,
-      buttons: 0,
-    };
-    el.dispatchEvent(new PointerEvent('pointerdown', downOpts));
-    el.dispatchEvent(new MouseEvent('mousedown', downOpts));
-    el.dispatchEvent(new PointerEvent('pointerup', upOpts));
-    el.dispatchEvent(new MouseEvent('mouseup', upOpts));
-    el.click();
-  }
+  function isMenuItemSelected(itemEl) {
+    const host = resolveMenuItemHost(itemEl);
+    if (!host) return false;
 
-  /**
-   * 专为 Angular Material 3 / CDK Menu 设计的菜单项激活器：
-   * 依次执行 Hover 移入 -> Focus 聚焦 -> 物理点击 -> 若菜单未收起则补发 Enter 键确认
-   */
-  async function activateCdkMenuItem(itemEl) {
-    if (!itemEl) return;
-    simulateHover(itemEl);
-    await sleep(60);
-    if (typeof itemEl.focus === 'function') {
-      itemEl.focus();
-    }
-    await sleep(60);
-    simulateRealClick(itemEl);
-    await sleep(180);
-
-    // 如果该菜单项依然在屏幕上且尚未被标记为选中，补发键盘 Enter 与 Space 强制触发 CDK MenuItem
-    if (isVisible(itemEl) && !isElementSelected(itemEl)) {
-      const enterDown = new KeyboardEvent('keydown', {
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-      });
-      const enterUp = new KeyboardEvent('keyup', {
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-      });
-      itemEl.dispatchEvent(enterDown);
-      itemEl.dispatchEvent(enterUp);
-      await sleep(150);
-    }
-  }
-
-  function isElementSelected(el) {
-    if (!el) return false;
     if (
-      el.getAttribute('aria-checked') === 'true' ||
-      el.getAttribute('aria-selected') === 'true' ||
-      el.getAttribute('aria-pressed') === 'true' ||
-      el.classList.contains('mat-button-toggle-checked') ||
-      el.classList.contains('mat-mdc-menu-item-highlighted') ||
-      el.classList.contains('selected') ||
-      el.classList.contains('active')
+      host.getAttribute('aria-checked') === 'true' ||
+      host.getAttribute('aria-selected') === 'true' ||
+      host.classList.contains('mdc-list-item--selected') ||
+      host.classList.contains('mat-mdc-option-active')
     ) {
-      if (!el.classList.contains('mat-mdc-menu-item-highlighted') || el.getAttribute('aria-checked') === 'true') {
-        return true;
-      }
-    }
-
-    const rawText = (el.innerText || el.textContent || '').trim();
-    if (rawText.startsWith('✓') || rawText.startsWith('✔')) {
       return true;
     }
 
-    const icons = Array.from(
-      el.querySelectorAll('mat-icon, .material-symbols-outlined, .google-symbols, svg')
-    );
+    const icons = host.querySelectorAll('mat-icon, .mat-mdc-menu-item-icon, svg, [class*="check"]');
     for (const icon of icons) {
-      if (!isVisible(icon)) continue;
-      const iconText = (icon.textContent || '').trim().toLowerCase();
-      if (
-        iconText === 'check' ||
-        iconText === 'done' ||
-        iconText === 'check_circle' ||
-        iconText === 'radio_button_checked'
-      ) {
-        return true;
+      if (isVisible(icon)) {
+        const iconText = (icon.textContent || '').trim().toLowerCase();
+        if (iconText === 'check' || iconText === '✓' || iconText === '✔' || icon.tagName.toLowerCase() === 'svg') {
+          return true;
+        }
       }
     }
-    return false;
+
+    const visibleText = (host.innerText || '').trim();
+    return /^[✓✔]/.test(visibleText);
+  }
+
+  const isElementSelected = isMenuItemSelected; // 兼容别名
+
+  /**
+   * 4. 零死角定位二级菜单中的「高 / 超级详尽」真实可点击宿主
+   *    - 严格规避「低 / 快速高效」中的“高”字子串碰撞
+   *    - 严格锁定最顶层（二级子菜单）中的叶子可交互宿主
+   */
+  function findThinkingLevelHighOption() {
+    const menuPanels = Array.from(
+      document.querySelectorAll(
+        '.cdk-overlay-container [role="menu"], .cdk-overlay-container .mat-mdc-menu-panel, .cdk-overlay-container .cdk-overlay-pane'
+      )
+    )
+      .filter(isVisible)
+      .reverse();
+
+    const searchRoots = menuPanels.length > 0 ? menuPanels : [document];
+
+    for (const root of searchRoots) {
+      const candidates = Array.from(root.querySelectorAll(INTERACTIVE_ITEM_HOST_SELECTOR)).filter(
+        (el) => {
+          if (!isVisible(el)) return false;
+          const hasPopup = el.getAttribute('aria-haspopup');
+          if (hasPopup === 'true' || hasPopup === 'menu') return false;
+          if (el.classList.contains('mat-mdc-menu-trigger') || el.classList.contains('mat-mdc-menu-submenu-trigger')) return false;
+          return true;
+        }
+      );
+
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const host of candidates) {
+        const rawText = (host.innerText || host.textContent || '').trim();
+        const normText = rawText.replace(/\s+/g, ' ');
+
+        // 【铁律】直接排除“低 / 快速高效”与“中 / 深度适中”，彻底杜绝“快速高效”中的“高”字误匹配！
+        if (/快速高效|深度适中|^(?:✓|check\s*)?[低中](?:\s|$|\/)/i.test(normText)) {
+          continue;
+        }
+
+        const lines = rawText
+          .split('\n')
+          .map((l) => l.replace(/^[✓✔]|^check$/gi, '').trim())
+          .filter(Boolean);
+        const primaryTitle = lines[0] || '';
+
+        let score = 0;
+        if (normText.includes('超级详尽')) score += 100;
+        if (primaryTitle === '高' || /^高\s*\/\s*超级详尽/.test(normText)) score += 80;
+        if (/^(?:✓|check\s*)?高(?:\s|$|\/)/.test(normText)) score += 50;
+        if (/^high\b/i.test(primaryTitle) || /super\s*detailed/i.test(normText)) score += 40;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = host;
+        }
+      }
+
+      if (bestMatch && bestScore >= 40) {
+        return bestMatch;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 5. 等待元素动画结束、几何坐标稳定（防止缩放动画期间点击落空）
+   */
+  async function waitForGeometryStable(el, maxWaitMs = 250) {
+    if (!el) return;
+    const start = performance.now();
+    let lastRect = el.getBoundingClientRect();
+
+    while (performance.now() - start < maxWaitMs) {
+      await sleep(35);
+      if (!el.isConnected) return;
+      const curRect = el.getBoundingClientRect();
+      const delta =
+        Math.abs(curRect.left - lastRect.left) +
+        Math.abs(curRect.top - lastRect.top) +
+        Math.abs(curRect.width - lastRect.width) +
+        Math.abs(curRect.height - lastRect.height);
+
+      if (delta < 0.5 && curRect.width > 4 && curRect.height > 4) {
+        return;
+      }
+      lastRect = curRect;
+    }
+  }
+
+  /**
+   * 6. 派发带完整 keyCode (兼容 Chromium + Angular CDK) 的键盘事件
+   */
+  function dispatchCdkKeyEvent(target, type, key, code, keyCode) {
+    if (!target) return;
+    const ev = new KeyboardEvent(type, {
+      key,
+      code,
+      keyCode,
+      which: keyCode,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window
+    });
+    if (ev.keyCode !== keyCode) {
+      try {
+        Object.defineProperty(ev, 'keyCode', { get: () => keyCode });
+        Object.defineProperty(ev, 'which', { get: () => keyCode });
+      } catch (_) {}
+    }
+    target.dispatchEvent(ev);
+  }
+
+  /**
+   * 7. 模拟 100% 拟真浏览器指针悬停与点击事件流
+   */
+  function simulateHover(el) {
+    if (!el || !isVisible(el)) return;
+    const rect = el.getBoundingClientRect();
+    const clientX = Math.round(rect.left + rect.width / 2);
+    const clientY = Math.round(rect.top + rect.height / 2);
+
+    const common = {
+      view: window,
+      clientX,
+      clientY,
+      screenX: clientX,
+      screenY: clientY,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true
+    };
+
+    el.dispatchEvent(new PointerEvent('pointerover', { ...common, bubbles: true, cancelable: true, composed: true }));
+    el.dispatchEvent(new PointerEvent('pointerenter', { ...common, bubbles: false, cancelable: false }));
+    el.dispatchEvent(new MouseEvent('mouseover', { ...common, bubbles: true, cancelable: true, composed: true }));
+    el.dispatchEvent(new MouseEvent('mouseenter', { ...common, bubbles: false, cancelable: false }));
+    el.dispatchEvent(new PointerEvent('pointermove', { ...common, bubbles: true, cancelable: true, composed: true }));
+    el.dispatchEvent(new MouseEvent('mousemove', { ...common, bubbles: true, cancelable: true, composed: true }));
+  }
+
+  function simulateLeave(el) {
+    if (!el || !(el instanceof Element)) return;
+    const common = { view: window, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    el.dispatchEvent(new PointerEvent('pointerout', { ...common, bubbles: true, cancelable: true }));
+    el.dispatchEvent(new PointerEvent('pointerleave', { ...common, bubbles: false, cancelable: false }));
+    el.dispatchEvent(new MouseEvent('mouseout', { ...common, bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('mouseleave', { ...common, bubbles: false, cancelable: false }));
+  }
+
+  async function simulateRealClick(rawEl) {
+    const el = resolveMenuItemHost(rawEl) || rawEl;
+    if (!el || !isVisible(el)) return;
+
+    const rect = el.getBoundingClientRect();
+    const clientX = Math.round(rect.left + Math.max(4, rect.width / 2));
+    const clientY = Math.round(rect.top + Math.max(4, rect.height / 2));
+
+    const baseOpts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX,
+      clientY,
+      screenX: clientX,
+      screenY: clientY,
+      detail: 1
+    };
+
+    const downOpts = {
+      ...baseOpts,
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true
+    };
+
+    const upOpts = {
+      ...baseOpts,
+      button: 0,
+      buttons: 0,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true
+    };
+
+    // Step 1: 完整按下事件流
+    el.dispatchEvent(new PointerEvent('pointerdown', downOpts));
+    el.dispatchEvent(new MouseEvent('mousedown', downOpts));
+
+    // Step 2: 赋予真实 DOM 焦点（模拟浏览器 mousedown 默认聚焦行为，激活 CDK FocusKeyManager）
+    if (typeof el.focus === 'function') {
+      try { el.focus({ preventScroll: true }); } catch (_) {}
+    }
+    await sleep(25);
+
+    // Step 3: 完整抬起与带坐标 detail=1 的真实 click 事件
+    el.dispatchEvent(new PointerEvent('pointerup', upOpts));
+    el.dispatchEvent(new MouseEvent('mouseup', upOpts));
+    el.dispatchEvent(new MouseEvent('click', upOpts));
+  }
+
+  /**
+   * 8. 工业级 CDK 菜单项激活函数（自动向上收敛宿主 + 动画同步 + 多重兜底激活）
+   */
+  async function activateCdkMenuItem(rawItemEl) {
+    const itemEl = resolveMenuItemHost(rawItemEl);
+    if (!itemEl) return false;
+
+    // 等待子菜单入场缩放动画彻底稳定
+    await waitForGeometryStable(itemEl, 220);
+
+    // 1. 悬停并聚焦宿主（使 Angular FocusKeyManager 将当前项设为 activeItem）
+    simulateHover(itemEl);
+    await sleep(50);
+    if (typeof itemEl.focus === 'function') {
+      try { itemEl.focus({ preventScroll: true }); } catch (_) {}
+    }
+    await sleep(50);
+
+    // 2. 执行主点击流
+    await simulateRealClick(itemEl);
+    await sleep(160);
+
+    // 判定是否成功：菜单已自动收起（最典型的成功标志）或当前项已变为选中态
+    if (!isVisible(itemEl) || isMenuItemSelected(itemEl)) {
+      return true;
+    }
+
+    // 3. 兜底 1：若仍未选中，调用一次原生 .click()
+    if (typeof itemEl.focus === 'function') {
+      try { itemEl.focus({ preventScroll: true }); } catch (_) {}
+    }
+    itemEl.click();
+    await sleep(120);
+
+    if (!isVisible(itemEl) || isMenuItemSelected(itemEl)) {
+      return true;
+    }
+
+    // 4. 兜底 2：针对 CdkMenuItemRadio 派发带 keyCode=32 (Space) 与 keyCode=13 (Enter) 的键盘激活
+    if (typeof itemEl.focus === 'function') {
+      try { itemEl.focus({ preventScroll: true }); } catch (_) {}
+    }
+    dispatchCdkKeyEvent(itemEl, 'keydown', ' ', 'Space', 32);
+    dispatchCdkKeyEvent(itemEl, 'keyup', ' ', 'Space', 32);
+    await sleep(80);
+
+    if (isVisible(itemEl) && !isMenuItemSelected(itemEl)) {
+      dispatchCdkKeyEvent(itemEl, 'keydown', 'Enter', 'Enter', 13);
+      dispatchCdkKeyEvent(itemEl, 'keyup', 'Enter', 'Enter', 13);
+      await sleep(100);
+    }
+
+    return !isVisible(itemEl) || isMenuItemSelected(itemEl);
   }
 
   function findSafetyBlockElement() {
@@ -721,95 +926,133 @@
   }
 
   /**
-   * 检查当前页面是否仍有打开的 CDK Menu / 浮层面板
+   * 9. 五级递进式浮层清退引擎：确保发送提示词前页面 Overlay 100% 物理消失
    */
-  function getOpenOverlayMenuPanes() {
-    const container = document.querySelector('.cdk-overlay-container');
-    if (!container) return [];
-    const panes = Array.from(container.querySelectorAll('.cdk-overlay-pane')).filter(isVisible);
-    return panes.filter((pane) => {
-      // 排除 Tooltip 浮层，只针对包含菜单项或选项的交互浮层
-      const hasMenuContent = pane.querySelector(
-        '[role="menu"], [role="listbox"], [role="menuitem"], [role="menuitemradio"], [role="option"], .mat-mdc-menu-panel, .mat-mdc-menu-item, button'
+  function getVisibleMenuOverlays() {
+    const panes = Array.from(
+      document.querySelectorAll(
+        '.cdk-overlay-container .cdk-overlay-pane, .cdk-overlay-container [role="menu"], .cdk-overlay-container .mat-mdc-menu-panel'
+      )
+    );
+    return panes.filter((el) => {
+      if (!isVisible(el)) return false;
+      // 仅针对包含菜单/列表项的浮层
+      return Boolean(
+        el.getAttribute('role') === 'menu' ||
+          el.getAttribute('role') === 'listbox' ||
+          el.querySelector('[role="menu"], [role="menuitem"], [role="menuitemradio"], [role="option"], .mat-mdc-menu-item')
       );
-      return Boolean(hasMenuContent);
     });
   }
 
-  /**
-   * 工业级多轮栈式 Overlay 优雅关闭器（彻底解决主菜单+二级子菜单双层悬停残留，且绝不破坏 Angular 视图树）
-   */
   async function closeActiveOverlays() {
-    for (let pass = 0; pass < 4; pass++) {
-      const openPanes = getOpenOverlayMenuPanes();
-      if (openPanes.length === 0) {
-        break;
+    // === Stage 1: 解除所有菜单项与父级触发器的 Hover 锁 ===
+    const hoveredNodes = document.querySelectorAll(
+      '.cdk-overlay-container [role^="menuitem"], .cdk-overlay-container [role="menu"], [aria-expanded="true"]'
+    );
+    hoveredNodes.forEach(simulateLeave);
+    await sleep(40);
+
+    if (getVisibleMenuOverlays().length === 0) return true;
+
+    // === Stage 2: 自底向上（先二级子菜单、再一级主菜单）对 [role="menu"] 本身派发 Escape ===
+    for (let round = 0; round < 3; round++) {
+      const visibleMenus = Array.from(
+        document.querySelectorAll('.cdk-overlay-container [role="menu"], .cdk-overlay-container .mat-mdc-menu-panel')
+      )
+        .filter(isVisible)
+        .reverse(); // 逆序：从最深层子菜单开始关闭
+
+      if (visibleMenus.length === 0 && getVisibleMenuOverlays().length === 0) {
+        return true;
       }
 
-      // 1. 向当前激活元素、最顶层菜单面板及 document 广播完整 Escape 键（逐层弹出菜单栈）
-      const escTargets = [
-        document.activeElement,
-        openPanes[openPanes.length - 1].querySelector('[role="menu"], .mat-mdc-menu-panel') ||
-          openPanes[openPanes.length - 1],
-        document.body,
-        document,
-      ].filter(Boolean);
-
-      for (const target of escTargets) {
-        try {
-          target.dispatchEvent(
-            new KeyboardEvent('keydown', {
-              key: 'Escape',
-              code: 'Escape',
-              keyCode: 27,
-              which: 27,
-              bubbles: true,
-              cancelable: true,
-            })
-          );
-          target.dispatchEvent(
-            new KeyboardEvent('keyup', {
-              key: 'Escape',
-              code: 'Escape',
-              keyCode: 27,
-              which: 27,
-              bubbles: true,
-              cancelable: true,
-            })
-          );
-        } catch (_) {}
-      }
-      await sleep(140);
-
-      if (getOpenOverlayMenuPanes().length === 0) break;
-
-      // 2. 点击所有可见的 CDK Backdrop（无论是 showing 还是 transparent 透明遮罩）
-      const backdrops = Array.from(
-        document.querySelectorAll('.cdk-overlay-container .cdk-overlay-backdrop')
-      ).filter(isVisible);
-      for (const bd of backdrops.reverse()) {
-        simulateRealClick(bd);
-        await sleep(120);
+      for (const menuEl of visibleMenus) {
+        const activeChild = menuEl.querySelector('[tabindex="0"], button, [role^="menuitem"]') || menuEl;
+        if (typeof activeChild.focus === 'function') {
+          try { activeChild.focus({ preventScroll: true }); } catch (_) {}
+        }
+        dispatchCdkKeyEvent(activeChild, 'keydown', 'Escape', 'Escape', 27);
+        dispatchCdkKeyEvent(activeChild, 'keyup', 'Escape', 'Escape', 27);
+        dispatchCdkKeyEvent(menuEl, 'keydown', 'Escape', 'Escape', 27);
+        dispatchCdkKeyEvent(menuEl, 'keyup', 'Escape', 'Escape', 27);
+        await sleep(60);
       }
 
-      if (getOpenOverlayMenuPanes().length === 0) break;
+      // 同步向 body / document 广播一次 Escape（触发 OverlayKeyboardDispatcher）
+      dispatchCdkKeyEvent(document.activeElement || document.body, 'keydown', 'Escape', 'Escape', 27);
+      dispatchCdkKeyEvent(document.body, 'keydown', 'Escape', 'Escape', 27);
+      await sleep(60);
 
-      // 3. 触发 Angular CDK OverlayOutsideClickDispatcher（点击页面安全空白处或收起 aria-expanded 按钮）
-      const expandedBtn = findModelSwitcherButton();
-      if (expandedBtn && expandedBtn.getAttribute('aria-expanded') === 'true') {
-        simulateRealClick(expandedBtn);
-        await sleep(150);
-      } else {
-        const safeTarget = document.querySelector('main') || document.body;
-        const opts = { bubbles: true, cancelable: true, view: window, clientX: 10, clientY: 200 };
-        safeTarget.dispatchEvent(new PointerEvent('pointerdown', opts));
-        safeTarget.dispatchEvent(new MouseEvent('mousedown', opts));
-        safeTarget.dispatchEvent(new PointerEvent('pointerup', opts));
-        safeTarget.dispatchEvent(new MouseEvent('mouseup', opts));
-        safeTarget.dispatchEvent(new MouseEvent('click', opts));
-        await sleep(150);
+      if (getVisibleMenuOverlays().length === 0) return true;
+
+      // === Stage 3: 逆序完整点击 Backdrop + 触发 OutsidePointerEvents ===
+      const backdrops = Array.from(document.querySelectorAll('.cdk-overlay-backdrop'))
+        .filter(isVisible)
+        .reverse();
+
+      for (const bd of backdrops) {
+        await simulateRealClick(bd);
+        await sleep(60);
       }
+
+      if (getVisibleMenuOverlays().length === 0) return true;
+
+      // 向页面左上角安全空白区 (2, 2) 派发完整指针点击，触发 CDK outsidePointerEvents()
+      const safeTarget = document.body;
+      const outOpts = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: 2,
+        clientY: 2,
+        button: 0,
+        detail: 1,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true
+      };
+      safeTarget.dispatchEvent(new PointerEvent('pointerdown', { ...outOpts, buttons: 1 }));
+      safeTarget.dispatchEvent(new MouseEvent('mousedown', { ...outOpts, buttons: 1 }));
+      safeTarget.dispatchEvent(new PointerEvent('pointerup', { ...outOpts, buttons: 0 }));
+      safeTarget.dispatchEvent(new MouseEvent('mouseup', { ...outOpts, buttons: 0 }));
+      safeTarget.dispatchEvent(new MouseEvent('click', { ...outOpts, buttons: 0 }));
+      await sleep(80);
+
+      if (getVisibleMenuOverlays().length === 0) return true;
     }
+
+    // === Stage 4: 若主菜单触发器仍处于 aria-expanded="true"，点击主触发按钮将其收起 ===
+    const openTriggers = Array.from(
+      document.querySelectorAll('button[aria-expanded="true"], [aria-haspopup="menu"][aria-expanded="true"]')
+    ).filter((btn) => !btn.closest('.cdk-overlay-container') && isVisible(btn));
+
+    for (const trigger of openTriggers) {
+      await simulateRealClick(trigger);
+      await sleep(100);
+    }
+
+    if (getVisibleMenuOverlays().length === 0) return true;
+
+    // === Stage 5: 终极物理清退兜底（绝不允许任何僵尸 Overlay 残留遮挡正文） ===
+    const zombiePanes = getVisibleMenuOverlays();
+    for (const node of zombiePanes) {
+      const pane = node.closest('.cdk-overlay-pane') || node;
+      pane.style.setProperty('display', 'none', 'important');
+      pane.style.setProperty('visibility', 'hidden', 'important');
+      pane.style.setProperty('pointer-events', 'none', 'important');
+    }
+
+    const zombieBackdrops = document.querySelectorAll('.cdk-overlay-backdrop');
+    zombieBackdrops.forEach((bd) => {
+      bd.classList.remove('cdk-overlay-backdrop-showing');
+      bd.style.setProperty('display', 'none', 'important');
+      bd.style.setProperty('pointer-events', 'none', 'important');
+    });
+
+    await sleep(40);
+    return getVisibleMenuOverlays().length === 0;
   }
 
   /**
@@ -872,146 +1115,15 @@
   }
 
   /**
-   * 精准判断单个菜单项节点是否匹配指定的思考等级 ('high' | 'medium' | 'low')
-   * @param {Element} el 候选菜单项根节点
-   * @param {string} tierKey 'high' | 'medium' | 'low'
-   */
-  function matchesThinkingTier(el, tierKey = 'high') {
-    if (!el) return false;
-    const cleanText = getCleanElementText(el).toLowerCase();
-    const rawText = (el.innerText || el.textContent || '')
-      .replace(/[✓✔]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-    const combinedText = `${cleanText} ${rawText}`.trim();
-
-    // 1. 严禁误伤主模型选项（3.5 Flash-Lite, 3.8 Flash, 3.1 Pro, 4 Argon 等）
-    if (
-      /\b(3\.1\s*pro|3\.5\s*flash|3\.8\s*flash|4\s*argon|flash-lite|gemini\s*pro)\b/i.test(combinedText) ||
-      /极速回答|全方位帮助|高级推理|复杂任务/i.test(combinedText)
-    ) {
-      return false;
-    }
-
-    // 2. 排除子菜单触发器本身（如 "思考等级 ▶" / "Thinking level"）
-    if (/(思考等级|思考深度|推理程度|thinking\s*level|thinking\s*effort)/i.test(combinedText)) {
-      return false;
-    }
-
-    // 3. 避免匹配到包裹了全部三个选项的外层父容器
-    const hasLowWord = /(快速高效|fast\s*and\s*efficient|\blow\b|(^|\s)低(\s|$))/i.test(combinedText);
-    const hasMedWord = /(深度适中|balanced|\bmedium\b|(^|\s)中(\s|$))/i.test(combinedText);
-    const hasHighWord = /(超级详尽|extra\s*thorough|\bhigh\b|(^|\s)高(\s|$))/i.test(combinedText);
-    if ((hasLowWord && hasHighWord) || (hasMedWord && hasHighWord)) {
-      return false; // 这是父级列表容器，不是单个叶子菜单项
-    }
-
-    if (tierKey === 'high') {
-      if (hasLowWord || hasMedWord) return false;
-      if (
-        combinedText.includes('超级详尽') ||
-        combinedText.includes('extra thorough') ||
-        combinedText.includes('深度思考') ||
-        combinedText.includes('maximum') ||
-        /^(高|high)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
-        /^(高|high)(\s|$|[\n\r（\(·:：/-])/i.test(rawText) ||
-        cleanText === '高' ||
-        rawText === '高'
-      ) {
-        return true;
-      }
-    } else if (tierKey === 'medium') {
-      if (hasLowWord || hasHighWord) return false;
-      if (
-        combinedText.includes('深度适中') ||
-        /^(中|medium)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
-        /^(中|medium)(\s|$|[\n\r（\(·:：/-])/i.test(rawText)
-      ) {
-        return true;
-      }
-    } else if (tierKey === 'low') {
-      if (hasMedWord || hasHighWord) return false;
-      if (
-        combinedText.includes('快速高效') ||
-        /^(低|low|minimal)(\s|$|[\n\r（\(·:：/-])/i.test(cleanText) ||
-        /^(低|low|minimal)(\s|$|[\n\r（\(·:：/-])/i.test(rawText)
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * 从任意给定的浮层容器（Pane 或 OverlayRoot）中提取可点击的菜单项候选列表
-   */
-  function collectMenuItemCandidates(scopeRoot) {
-    if (!scopeRoot) return [];
-    const selector = [
-      'button[role="menuitemradio"]',
-      'button[role="menuitem"]',
-      '[role="menuitemradio"]',
-      '[role="menuitem"]',
-      '[role="option"]',
-      '[role="radio"]',
-      'mat-option',
-      '.mat-mdc-menu-item',
-      'mat-button-toggle button',
-      'button',
-    ].join(', ');
-
-    const rawNodes = Array.from(scopeRoot.querySelectorAll(selector)).filter(isVisible);
-    const uniqueInteractive = [];
-
-    for (const node of rawNodes) {
-      const interactiveHost =
-        node.closest(
-          '[role="menuitemradio"], [role="menuitem"], [role="option"], .mat-mdc-menu-item, mat-option, button'
-        ) || node;
-      if (isVisible(interactiveHost) && !uniqueInteractive.includes(interactiveHost)) {
-        uniqueInteractive.push(interactiveHost);
-      }
-    }
-    return uniqueInteractive;
-  }
-
-  /**
-   * 在当前打开的浮层容器中直接检索目标思考档位（如 "高 / 超级详尽"）叶子选项
-   * 无死角扫描所有 .cdk-overlay-pane，不受 Pane 数量与嵌套层级影响！
-   */
-  function findThinkingTierLeafOption(targetTier = 'high') {
-    const container = document.querySelector('.cdk-overlay-container') || document.body;
-    const items = collectMenuItemCandidates(container);
-
-    for (const item of items) {
-      if (matchesThinkingTier(item, targetTier)) {
-        const isDisabled =
-          item.disabled ||
-          item.getAttribute('aria-disabled') === 'true' ||
-          item.classList.contains('mat-mdc-menu-item-disabled');
-        if (!isDisabled) {
-          return {
-            element: item,
-            alreadySelected: isElementSelected(item),
-            label: getCleanElementText(item) || targetTier.toUpperCase(),
-          };
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
    * 在主模型菜单中查找“思考等级 ▶ / Thinking level”二级菜单入口触发器
    * 严苛过滤：彻底排除 3.1 Pro (高级推理 / Advanced reasoning) 及所有主模型，100% 锁定菜单底部的思考等级入口！
    */
   function findThinkingSubmenuTriggerInOverlay() {
     const container = document.querySelector('.cdk-overlay-container') || document.body;
-    const items = collectMenuItemCandidates(container);
+    const items = Array.from(container.querySelectorAll(INTERACTIVE_ITEM_HOST_SELECTOR)).filter(isVisible);
 
-    for (const item of items) {
+    for (const rawItem of items) {
+      const item = resolveMenuItemHost(rawItem) || rawItem;
       const text = getCleanElementText(item).toLowerCase();
       const raw = (item.innerText || item.textContent || '').toLowerCase();
       const aria = (item.getAttribute('aria-label') || '').toLowerCase();
@@ -1026,11 +1138,17 @@
         continue;
       }
 
-      // 2. 必须包含“思考等级”或“思考”关键词，且包含二级子菜单指示符（向右箭头或 aria-haspopup）
+      // 2. 排除子选项本身（高/超级详尽、中/深度适中、低/快速高效）
+      if (/快速高效|深度适中|超级详尽|extra\s*thorough/i.test(`${text} ${raw}`)) {
+        continue;
+      }
+
+      // 3. 必须包含“思考等级”或“思考”关键词，且包含二级子菜单指示符（向右箭头或 aria-haspopup）
       const hasSubmenuCue =
         item.getAttribute('aria-haspopup') === 'menu' ||
         item.getAttribute('aria-haspopup') === 'true' ||
         item.classList.contains('mat-mdc-menu-submenu-trigger') ||
+        item.classList.contains('mat-mdc-menu-trigger') ||
         item.querySelector('mat-icon, svg, .material-symbols-outlined') !== null ||
         /[▶>›»]/.test(raw);
 
@@ -1049,13 +1167,14 @@
    */
   function findTargetModelOptionInOverlay(targetKeywords) {
     const container = document.querySelector('.cdk-overlay-container') || document.body;
-    const items = collectMenuItemCandidates(container);
+    const items = Array.from(container.querySelectorAll(INTERACTIVE_ITEM_HOST_SELECTOR)).filter(isVisible);
 
     for (const keyword of targetKeywords) {
       const kw = keyword.toLowerCase();
-      for (const item of items) {
-        // 排除“思考等级”触发器本身与子选项
+      for (const rawItem of items) {
+        const item = resolveMenuItemHost(rawItem) || rawItem;
         const text = getCleanElementText(item).toLowerCase();
+        // 排除“思考等级”触发器本身与子选项
         if (/(思考等级|thinking\s*level|超级详尽|快速高效|深度适中)/i.test(text)) continue;
 
         if (text.includes(kw)) {
@@ -1068,7 +1187,7 @@
               element: item,
               matchedKeyword: keyword,
               fullText: getCleanElementText(item),
-              alreadySelected: isElementSelected(item),
+              alreadySelected: isMenuItemSelected(item),
             };
           } else {
             // 选项存在但被官方置灰禁用 -> 确诊官方额度耗尽！
@@ -1090,54 +1209,48 @@
   /**
    * 展开“思考等级 ▶”二级子菜单并激活“高 / 超级详尽”选项
    */
-  async function expandSubmenuAndSelectTier(submenuTriggerEl, targetTier = 'high') {
+  async function expandSubmenuAndSelectTier(submenuTriggerEl) {
     if (!submenuTriggerEl) return false;
 
-    // 采用“聚焦 + 悬停 + 物理点击 + 向右键”复合激活，确保 100% 触发 CDK matMenuTriggerFor 展开
-    try {
-      submenuTriggerEl.focus();
-    } catch (_) {}
-    simulateHover(submenuTriggerEl);
-    await sleep(100);
-    simulateRealClick(submenuTriggerEl);
-    submenuTriggerEl.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'ArrowRight',
-        code: 'ArrowRight',
-        keyCode: 39,
-        which: 39,
-        bubbles: true,
-      })
-    );
+    const triggerHost = resolveMenuItemHost(submenuTriggerEl) || submenuTriggerEl;
 
-    // 轮询等待二级子菜单在 DOM 中渲染并检索叶子选项
-    let leafOpt = null;
+    // 1. 采用“聚焦 + 悬停 + 物理点击 + 向右键”复合激活，确保 100% 触发 CDK matMenuTriggerFor 展开
+    if (typeof triggerHost.focus === 'function') {
+      try { triggerHost.focus({ preventScroll: true }); } catch (_) {}
+    }
+    simulateHover(triggerHost);
+    await sleep(100);
+    await simulateRealClick(triggerHost);
+    dispatchCdkKeyEvent(triggerHost, 'keydown', 'ArrowRight', 'ArrowRight', 39);
+    dispatchCdkKeyEvent(triggerHost, 'keyup', 'ArrowRight', 'ArrowRight', 39);
+
+    // 2. 轮询等待二级子菜单在 DOM 中渲染并检索叶子选项
+    let highHost = null;
     const waitStart = Date.now();
     while (Date.now() - waitStart < 3500) {
-      await sleep(120);
-      leafOpt = findThinkingTierLeafOption(targetTier);
-      if (leafOpt) break;
+      await sleep(100);
+      highHost = findThinkingLevelHighOption();
+      if (highHost) break;
     }
 
-    if (!leafOpt) {
+    if (!highHost) {
+      console.warn('[Argon-Bridge] 未在二级子菜单中定位到「高 / 超级详尽」选项');
       return false;
     }
 
-    // 精准激活“高 / 超级详尽”叶子节点
-    if (!leafOpt.alreadySelected) {
-      reportStatus(
-        `正在锁定思考等级 -> ${targetTier.toUpperCase()}`,
-        `已定位二级菜单项 [${leafOpt.label}]，正在激活...`
-      );
-      await activateCdkMenuItem(leafOpt.element);
-      await sleep(350);
+    // 3. 精准激活「高 / 超级详尽」叶子节点
+    const alreadySelected = isMenuItemSelected(highHost);
+    if (!alreadySelected) {
+      reportStatus('锁定思考等级 -> HIGH', '已定位「高 / 超级详尽」宿主，正在激活...');
+      const ok = await activateCdkMenuItem(highHost);
+      await sleep(200);
+      return ok;
     } else {
-      reportStatus('思考深度已处于最高档', `[${leafOpt.label}] 处于勾选状态`);
-      await activateCdkMenuItem(leafOpt.element);
-      await sleep(150);
+      reportStatus('思考深度已处于最高档', '「高 / 超级详尽」已处于勾选状态');
+      await simulateRealClick(highHost);
+      await sleep(100);
+      return true;
     }
-
-    return true;
   }
 
   /**
@@ -1192,7 +1305,7 @@
         `当前按钮为 [${initialBtnText || 'Flash'}]，呼出设置菜单...`
       );
 
-      simulateRealClick(switcherBtn);
+      await simulateRealClick(switcherBtn);
       await sleep(350);
 
       let modelOpt = null;
@@ -1220,14 +1333,15 @@
       // Pass 2：锁定“思考等级 -> 高 (超级详尽)”
       // ---------------------------------------------------------------------
       // 2a. 先直接在浮层中探测是否已露出“高 / 超级详尽”叶子选项
-      let directLeaf = findThinkingTierLeafOption(targetTier);
-      if (directLeaf) {
-        if (!directLeaf.alreadySelected) {
-          reportStatus('锁定思考深度', `直接点击 [${directLeaf.label}]...`);
-          await activateCdkMenuItem(directLeaf.element);
-          await sleep(350);
+      let directHigh = findThinkingLevelHighOption();
+      if (directHigh) {
+        if (!isMenuItemSelected(directHigh)) {
+          reportStatus('锁定思考深度', '直接命中「高 / 超级详尽」选项，激活中...');
+          thinkingLocked = await activateCdkMenuItem(directHigh);
+          await sleep(200);
+        } else {
+          thinkingLocked = true;
         }
-        thinkingLocked = true;
       } else {
         // 2b. 探测“思考等级 ▶”触发器并展开二级子菜单
         let subTrigger = null;
@@ -1240,7 +1354,7 @@
 
         if (subTrigger) {
           reportStatus('展开思考设置', '定位到 [思考等级] 选项，展开二级菜单...');
-          thinkingLocked = await expandSubmenuAndSelectTier(subTrigger, targetTier);
+          thinkingLocked = await expandSubmenuAndSelectTier(subTrigger);
         } else {
           reportStatus('⚠️ 提示', '未在菜单中识别到独立思考等级触发器');
         }
@@ -1253,7 +1367,7 @@
       console.warn('[Argon-Bridge] Model/Thinking lock warning:', err);
     } finally {
       // ---------------------------------------------------------------------
-      // Pass 3：强制执行多轮栈式拆解，确保所有 CDK 浮层 100% 彻底干净收起
+      // Pass 3：五级递进式浮层彻底清退，确保 100% 物理消失
       // ---------------------------------------------------------------------
       await closeActiveOverlays();
     }
@@ -1271,7 +1385,7 @@
 
     const inputEl = findInputElement();
     if (inputEl) {
-      inputEl.focus();
+      try { inputEl.focus(); } catch (_) {}
     }
 
     reportStatus(

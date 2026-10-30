@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Argon Bridge v3.1.1 (Precision Thinking Lock & Submenu Overlay Clean)",
-  "version": "3.1.1",
-  "description": "Argon Bridge v3.1.1: Active deterministic High-Thinking lock, trigger anti-hijacking, and clean overlay lifecycle",
+  "name": "Argon Bridge v3.2.0 (Host Resolution, Synthetic Click Flow & 5-Stage Overlay Tear-Down)",
+  "version": "3.2.0",
+  "description": "Argon Bridge v3.2.0: Active deterministic High-Thinking lock, host resolution, coordinate click flow, and 5-stage overlay tear-down",
   "permissions": [
     "tabs",
     "scripting",
