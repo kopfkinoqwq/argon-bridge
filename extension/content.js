@@ -1,5 +1,5 @@
 /**
- * Argon Bridge v3.1.0 - Content Script for https://gemini.google.com/*
+ * Argon Bridge v3.1.1 - Content Script for https://gemini.google.com/*
  * Full-Duplex Autonomous Agent Bus, Zero-Touch Clipboard, O(1) Watchdog & Entropy Guard
  * Features:
  * 1. Top-right HUD displaying connection state + active [Project <-> Chat ID] badge
@@ -168,7 +168,7 @@
         <div class="text-col">
           <div class="title-row">
             <span class="title" id="title">Argon Bridge</span>
-            <span class="version-badge">v3.1.0</span>
+            <span class="version-badge">v3.1.1</span>
             <span class="project-badge" id="badge">${initialChatId ? '#' + initialChatId.slice(0, 8) : 'New Chat'}</span>
           </div>
           <span class="detail" id="detail">初始化中...</span>
@@ -856,25 +856,27 @@
     return null;
   }
 
+  // 会话级高思考锁定状态缓存（按 chatId 记录，同一会话内成功锁定一次后不再重复弹窗，新会话或无 chatId 则强制主动执行锁定）
+  let sessionHighThinkingLockedChatId = null;
+
   /**
-   * 检查底部模型药丸是否已经体现出“高 / High”状态（如 "Argon 高" 或 "Argon High"）
+   * 检查底部模型药丸是否在界面上真正显式展示了独立思考档位标签（极少数 UI 变体会直接渲染 "Argon · 高"）
+   * 注意：绝不可盲目匹配 aria 中的 "高级"，因为 "高级模型" 属于 Pro/Argon 模型本身的定语，绝非思考档位！
    */
-  function isModelPillShowingHigh(btn) {
+  function isModelPillShowingExplicitHigh(btn) {
     if (!btn) return false;
     const clean = getCleanElementText(btn);
-    const aria = btn.getAttribute('aria-label') || '';
-    const combined = `${clean} ${aria}`.trim();
-    if (/(\b(low|medium|minimal)\b|低|中)/i.test(combined)) return false;
-    return /(\bhigh\b|高|超级详尽|深度)/i.test(combined);
+    // 仅当可见文本明确以 "高" 或 "High" 作为独立词/后缀呈现时才有效（如 "Argon 高"、"Argon · 高"、"Argon High"）
+    if (/(\b(low|medium|minimal)\b|低|中)/i.test(clean)) return false;
+    return /(\s|·|-|\()+(high|高)(\)|\s|$)/i.test(clean) || /^(高|high)$/i.test(clean);
   }
 
   /**
    * 精准判断单个菜单项节点是否匹配指定的思考等级 ('high' | 'medium' | 'low')
    * @param {Element} el 候选菜单项根节点
    * @param {string} tierKey 'high' | 'medium' | 'low'
-   * @param {boolean} isInsideVerifiedSubmenu 是否已确认位于二级“思考等级”子菜单面板内
    */
-  function matchesThinkingTier(el, tierKey = 'high', isInsideVerifiedSubmenu = false) {
+  function matchesThinkingTier(el, tierKey = 'high') {
     if (!el) return false;
     const cleanText = getCleanElementText(el).toLowerCase();
     const rawText = (el.innerText || el.textContent || '')
@@ -884,19 +886,17 @@
       .toLowerCase();
     const combinedText = `${cleanText} ${rawText}`.trim();
 
-    // 1. 排除子菜单触发器本身（如 "思考等级 ▶" / "Thinking level"）
-    if (/(思考等级|思考深度|推理程度|thinking\s*level|thinking\s*effort|reasoning\s*effort)/i.test(combinedText)) {
+    // 1. 严禁误伤主模型选项（3.5 Flash-Lite, 3.8 Flash, 3.1 Pro, 4 Argon 等）
+    if (
+      /\b(3\.1\s*pro|3\.5\s*flash|3\.8\s*flash|4\s*argon|flash-lite|gemini\s*pro)\b/i.test(combinedText) ||
+      /极速回答|全方位帮助|高级推理|复杂任务/i.test(combinedText)
+    ) {
       return false;
     }
 
-    // 2. 如果不在已验证的二级子菜单内，严防误伤主菜单中的模型项（如 "3.1 Pro 高级推理"、"4 Argon 复杂任务"）
-    if (!isInsideVerifiedSubmenu) {
-      if (
-        /\b(pro|flash|lite|argon|ultra|gemini|\d\.\d)\b/i.test(combinedText) ||
-        /极速回答|全方位帮助|高级推理|复杂任务/i.test(combinedText)
-      ) {
-        return false;
-      }
+    // 2. 排除子菜单触发器本身（如 "思考等级 ▶" / "Thinking level"）
+    if (/(思考等级|思考深度|推理程度|thinking\s*level|thinking\s*effort)/i.test(combinedText)) {
+      return false;
     }
 
     // 3. 避免匹配到包裹了全部三个选项的外层父容器
@@ -966,7 +966,6 @@
     const uniqueInteractive = [];
 
     for (const node of rawNodes) {
-      // 向上收敛到最标准的可交互宿主（避免重复收集 button 和它内部的 span）
       const interactiveHost =
         node.closest(
           '[role="menuitemradio"], [role="menuitem"], [role="option"], .mat-mdc-menu-item, mat-option, button'
@@ -979,111 +978,67 @@
   }
 
   /**
-   * 核心空间隔离器：在所有已打开的 .cdk-overlay-pane 中，精准识别“思考等级”二级子菜单面板
-   * 判定依据：该 Pane 的文本同时包含“低/快速高效”与“高/超级详尽”（或存在多个 Pane 时位于最上层/最右侧的子面板）
-   */
-  function findThinkingSubmenuPane() {
-    const panes = getOpenOverlayMenuPanes();
-    if (panes.length === 0) return null;
-
-    // 逆序遍历（CDK 后打开的二级子菜单 Pane 必定排在 DOM 后面）
-    for (let i = panes.length - 1; i >= 0; i--) {
-      const pane = panes[i];
-      const paneText = getCleanElementText(pane).toLowerCase();
-      const hasHighCue = /(超级详尽|extra\s*thorough|\bhigh\b|高)/i.test(paneText);
-      const hasLowCue = /(快速高效|fast|\blow\b|低)/i.test(paneText);
-      const isMainModelMenu = /(4\s*argon|复杂任务|3\.1\s*pro|flash)/i.test(paneText);
-
-      // 如果该面板包含 高+低 特征，且不包含主模型列表（说明它是纯粹的二级子菜单 Pane！）
-      if (hasHighCue && hasLowCue && !isMainModelMenu) {
-        return { pane, isVerifiedSubmenu: true };
-      }
-    }
-
-    // 如果某些布局把思考等级内联在同一个面板里，退回检查所有面板
-    for (let i = panes.length - 1; i >= 0; i--) {
-      const pane = panes[i];
-      const paneText = getCleanElementText(pane).toLowerCase();
-      if (/(超级详尽|extra\s*thorough)/i.test(paneText)) {
-        return { pane, isVerifiedSubmenu: false };
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * 专门在二级子菜单（或已打开的浮层）中查找目标思考档位叶子节点（绝不返回 isSubmenuTrigger，防止死循环）
+   * 在当前打开的浮层容器中直接检索目标思考档位（如 "高 / 超级详尽"）叶子选项
+   * 无死角扫描所有 .cdk-overlay-pane，不受 Pane 数量与嵌套层级影响！
    */
   function findThinkingTierLeafOption(targetTier = 'high') {
-    // 1. 优先在已隔离的二级子菜单 Pane 中查找
-    const submenuInfo = findThinkingSubmenuPane();
-    if (submenuInfo) {
-      const items = collectMenuItemCandidates(submenuInfo.pane);
-      for (const item of items) {
-        if (matchesThinkingTier(item, targetTier, submenuInfo.isVerifiedSubmenu)) {
-          const isDisabled =
-            item.disabled ||
-            item.getAttribute('aria-disabled') === 'true' ||
-            item.classList.contains('mat-mdc-menu-item-disabled');
-          if (!isDisabled) {
-            return {
-              element: item,
-              alreadySelected: isElementSelected(item),
-              label: getCleanElementText(item) || targetTier.toUpperCase(),
-            };
-          }
+    const container = document.querySelector('.cdk-overlay-container') || document.body;
+    const items = collectMenuItemCandidates(container);
+
+    for (const item of items) {
+      if (matchesThinkingTier(item, targetTier)) {
+        const isDisabled =
+          item.disabled ||
+          item.getAttribute('aria-disabled') === 'true' ||
+          item.classList.contains('mat-mdc-menu-item-disabled');
+        if (!isDisabled) {
+          return {
+            element: item,
+            alreadySelected: isElementSelected(item),
+            label: getCleanElementText(item) || targetTier.toUpperCase(),
+          };
         }
       }
     }
-
-    // 2. 遍历所有打开的 Pane（逆序，子菜单优先）
-    const panes = getOpenOverlayMenuPanes();
-    for (let i = panes.length - 1; i >= 0; i--) {
-      const items = collectMenuItemCandidates(panes[i]);
-      for (const item of items) {
-        if (matchesThinkingTier(item, targetTier, false)) {
-          const isDisabled =
-            item.disabled ||
-            item.getAttribute('aria-disabled') === 'true' ||
-            item.classList.contains('mat-mdc-menu-item-disabled');
-          if (!isDisabled) {
-            return {
-              element: item,
-              alreadySelected: isElementSelected(item),
-              label: getCleanElementText(item) || targetTier.toUpperCase(),
-            };
-          }
-        }
-      }
-    }
-
     return null;
   }
 
   /**
    * 在主模型菜单中查找“思考等级 ▶ / Thinking level”二级菜单入口触发器
+   * 严苛过滤：彻底排除 3.1 Pro (高级推理 / Advanced reasoning) 及所有主模型，100% 锁定菜单底部的思考等级入口！
    */
   function findThinkingSubmenuTriggerInOverlay() {
-    const panes = getOpenOverlayMenuPanes();
-    for (const pane of panes) {
-      const items = collectMenuItemCandidates(pane);
-      for (const item of items) {
-        const text = getCleanElementText(item).toLowerCase();
-        const aria = (item.getAttribute('aria-label') || '').toLowerCase();
-        const hasSubmenuAttr =
-          item.getAttribute('aria-haspopup') === 'menu' ||
-          item.getAttribute('aria-haspopup') === 'true' ||
-          item.classList.contains('mat-mdc-menu-submenu-trigger');
+    const container = document.querySelector('.cdk-overlay-container') || document.body;
+    const items = collectMenuItemCandidates(container);
 
-        if (
-          /(思考等级|思考深度|推理程度|思考模式|thinking\s*level|thinking\s*effort|reasoning)/i.test(
-            `${text} ${aria}`
-          ) ||
-          (hasSubmenuAttr && /(思考|推理|thinking|reasoning)/i.test(`${text} ${aria}`))
-        ) {
-          return item;
-        }
+    for (const item of items) {
+      const text = getCleanElementText(item).toLowerCase();
+      const raw = (item.innerText || item.textContent || '').toLowerCase();
+      const aria = (item.getAttribute('aria-label') || '').toLowerCase();
+
+      // 1. 绝对排除所有主模型选项（绝不可让 3.1 Pro 高级推理劫持触发器！）
+      if (
+        /\b(3\.1|3\.5|3\.8|4\s*argon|pro|flash|lite|argon|ultra)\b/i.test(text) ||
+        /\b(3\.1|3\.5|3\.8|4\s*argon|pro|flash|lite|argon|ultra)\b/i.test(aria) ||
+        /高级推理|复杂任务|极速回答|全方位帮助/i.test(text) ||
+        /高级推理|复杂任务|极速回答|全方位帮助/i.test(raw)
+      ) {
+        continue;
+      }
+
+      // 2. 必须包含“思考等级”或“思考”关键词，且包含二级子菜单指示符（向右箭头或 aria-haspopup）
+      const hasSubmenuCue =
+        item.getAttribute('aria-haspopup') === 'menu' ||
+        item.getAttribute('aria-haspopup') === 'true' ||
+        item.classList.contains('mat-mdc-menu-submenu-trigger') ||
+        item.querySelector('mat-icon, svg, .material-symbols-outlined') !== null ||
+        /[▶>›»]/.test(raw);
+
+      if (
+        /(思考等级|思考深度|推理等级|thinking\s*level|thinking\s*tier)/i.test(`${text} ${aria}`) ||
+        (hasSubmenuCue && /(思考|thinking)/i.test(`${text} ${aria}`))
+      ) {
+        return item;
       }
     }
     return null;
@@ -1093,17 +1048,13 @@
    * 在主模型菜单中查找目标主模型项（如 "4 Argon / 复杂任务"）
    */
   function findTargetModelOptionInOverlay(targetKeywords) {
-    const panes = getOpenOverlayMenuPanes();
-    if (panes.length === 0) return null;
-
-    // 主模型一定在第一个打开的主菜单 Pane (panes[0]) 中
-    const mainPane = panes[0];
-    const items = collectMenuItemCandidates(mainPane);
+    const container = document.querySelector('.cdk-overlay-container') || document.body;
+    const items = collectMenuItemCandidates(container);
 
     for (const keyword of targetKeywords) {
       const kw = keyword.toLowerCase();
       for (const item of items) {
-        // 排除“思考等级”触发器本身
+        // 排除“思考等级”触发器本身与子选项
         const text = getCleanElementText(item).toLowerCase();
         if (/(思考等级|thinking\s*level|超级详尽|快速高效|深度适中)/i.test(text)) continue;
 
@@ -1137,60 +1088,53 @@
   }
 
   /**
-   * 展开“思考等级 ▶”二级子菜单并选中目标档位（如“高 / 超级详尽”）
+   * 展开“思考等级 ▶”二级子菜单并激活“高 / 超级详尽”选项
    */
   async function expandSubmenuAndSelectTier(submenuTriggerEl, targetTier = 'high') {
     if (!submenuTriggerEl) return false;
 
-    // 第一步：先通过 Hover 悬停触发 Angular Material 子菜单自然展开（切勿立即 Click 以免二次翻转关闭）
-    submenuTriggerEl.focus();
+    // 采用“聚焦 + 悬停 + 物理点击 + 向右键”复合激活，确保 100% 触发 CDK matMenuTriggerFor 展开
+    try {
+      submenuTriggerEl.focus();
+    } catch (_) {}
     simulateHover(submenuTriggerEl);
+    await sleep(100);
+    simulateRealClick(submenuTriggerEl);
+    submenuTriggerEl.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowRight',
+        code: 'ArrowRight',
+        keyCode: 39,
+        which: 39,
+        bubbles: true,
+      })
+    );
 
+    // 轮询等待二级子菜单在 DOM 中渲染并检索叶子选项
     let leafOpt = null;
-    const hoverWaitStart = Date.now();
-    while (Date.now() - hoverWaitStart < 1200) {
-      await sleep(100);
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 3500) {
+      await sleep(120);
       leafOpt = findThinkingTierLeafOption(targetTier);
       if (leafOpt) break;
-    }
-
-    // 第二步：若仅靠 Hover 在 1.2s 内未展开子菜单，再执行物理 Click 或 ArrowRight 键展开
-    if (!leafOpt) {
-      simulateRealClick(submenuTriggerEl);
-      submenuTriggerEl.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'ArrowRight',
-          code: 'ArrowRight',
-          keyCode: 39,
-          which: 39,
-          bubbles: true,
-        })
-      );
-
-      const clickWaitStart = Date.now();
-      while (Date.now() - clickWaitStart < 2000) {
-        await sleep(100);
-        leafOpt = findThinkingTierLeafOption(targetTier);
-        if (leafOpt) break;
-      }
     }
 
     if (!leafOpt) {
       return false;
     }
 
-    // 第三步：精准激活“高 / 超级详尽”叶子节点
+    // 精准激活“高 / 超级详尽”叶子节点
     if (!leafOpt.alreadySelected) {
       reportStatus(
         `正在锁定思考等级 -> ${targetTier.toUpperCase()}`,
         `已定位二级菜单项 [${leafOpt.label}]，正在激活...`
       );
       await activateCdkMenuItem(leafOpt.element);
-      await sleep(280);
+      await sleep(350);
     } else {
-      // 即便已选中，也轻点一次或直接关闭浮层使菜单自然收起
+      reportStatus('思考深度已处于最高档', `[${leafOpt.label}] 处于勾选状态`);
       await activateCdkMenuItem(leafOpt.element);
-      await sleep(200);
+      await sleep(150);
     }
 
     return true;
@@ -1200,7 +1144,7 @@
    * 核心预检与双重锁定总控流水线：
    * 1. 确保主模型锁定为 4 Argon
    * 2. 确保二级子菜单“思考等级”锁定为“高 / 超级详尽”
-   * 3. 彻底清空所有 CDK Overlay 浮层并校验底部输入栏药丸状态
+   * 3. 彻底清空所有 CDK Overlay 浮层
    */
   async function ensureTargetModelAndThinking(preferredModel = 'Argon', preferredThinkingTier = 'high') {
     const targetModelKeywords = preferredModel
@@ -1223,108 +1167,105 @@
 
       const initialBtnText = getCleanElementText(switcherBtn);
       const isModelAlreadyTarget = initialBtnText.toLowerCase().includes(targetModelKeywords[0]);
+      const currentCid = getCurrentChatIdFromUrl();
 
-      // 快速短路通道：如果底部输入栏的模型药丸已经明确显示为 "Argon 高" / "Argon High"，直接零延迟放行！
-      if (isModelAlreadyTarget && targetTier === 'high' && isModelPillShowingHigh(switcherBtn)) {
-        await closeActiveOverlays();
-        return {
-          model: initialBtnText,
-          thinkingLevel: targetTier,
-          thinkingLocked: true,
-        };
+      // 会话级放行检查：只有当此会话在页面运行时中已经被成功锁过 High，或者按钮文本明确带 "高" 时才放行
+      if (isModelAlreadyTarget && targetTier === 'high') {
+        if (
+          isModelPillShowingExplicitHigh(switcherBtn) ||
+          (currentCid && sessionHighThinkingLockedChatId === currentCid)
+        ) {
+          await closeActiveOverlays();
+          return {
+            model: initialBtnText,
+            thinkingLevel: targetTier,
+            thinkingLocked: true,
+          };
+        }
       }
 
       // ---------------------------------------------------------------------
-      // Pass 1：确保主模型已切换至 4 Argon
+      // Pass 1：打开模型菜单，确保主模型切换至 4 Argon
       // ---------------------------------------------------------------------
-      if (!isModelAlreadyTarget) {
-        reportStatus(
-          `检测到当前模型为 [${initialBtnText || 'Flash'}]`,
-          `正在切换主模型至 ${preferredModel}...`
-        );
+      reportStatus(
+        `正在对齐模型与思考深度 (${preferredModel} / ${targetTier.toUpperCase()})...`,
+        `当前按钮为 [${initialBtnText || 'Flash'}]，呼出设置菜单...`
+      );
 
-        simulateRealClick(switcherBtn);
+      simulateRealClick(switcherBtn);
+      await sleep(350);
 
-        let modelOpt = null;
-        const waitStart = Date.now();
-        while (Date.now() - waitStart < 2500) {
-          await sleep(100);
-          modelOpt = findTargetModelOptionInOverlay(targetModelKeywords);
-          if (modelOpt) break;
+      let modelOpt = null;
+      const modelWaitStart = Date.now();
+      while (Date.now() - modelWaitStart < 2500) {
+        modelOpt = findTargetModelOptionInOverlay(targetModelKeywords);
+        if (modelOpt) break;
+        await sleep(100);
+      }
+
+      if (modelOpt) {
+        if (modelOpt.quotaExhausted) {
+          await closeActiveOverlays();
+          throw new Error('[QUOTA_EXHAUSTED] 云端 Gemini 4 Argon 官方额度已耗尽（选项已被官方禁用，需等待数小时重置）。已自动触发退火保护，请由本地执行官接管。');
         }
-
-        if (modelOpt) {
-          if (modelOpt.quotaExhausted) {
-            await closeActiveOverlays();
-            throw new Error('[QUOTA_EXHAUSTED] 云端 Gemini 4 Argon 官方额度已耗尽（选项已被官方禁用，需等待数小时重置）。已自动触发退火保护，请由本地执行官接管。');
-          }
-          if (!modelOpt.alreadySelected) {
-            await activateCdkMenuItem(modelOpt.element);
-            await sleep(400);
-          }
-          finalModelLabel = modelOpt.fullText || preferredModel;
+        if (!modelOpt.alreadySelected) {
+          reportStatus('切换主模型', `选中目标模型 [${modelOpt.fullText}]...`);
+          await activateCdkMenuItem(modelOpt.element);
+          await sleep(400);
         }
-      } else {
-        finalModelLabel = initialBtnText || preferredModel;
+        finalModelLabel = modelOpt.fullText || preferredModel;
       }
 
       // ---------------------------------------------------------------------
-      // Pass 2：检查并锁定“思考等级 -> 高 (超级详尽)”
+      // Pass 2：锁定“思考等级 -> 高 (超级详尽)”
       // ---------------------------------------------------------------------
-      const currentSwitcherBtn = findModelSwitcherButton();
-      if (currentSwitcherBtn && targetTier === 'high' && isModelPillShowingHigh(currentSwitcherBtn)) {
+      // 2a. 先直接在浮层中探测是否已露出“高 / 超级详尽”叶子选项
+      let directLeaf = findThinkingTierLeafOption(targetTier);
+      if (directLeaf) {
+        if (!directLeaf.alreadySelected) {
+          reportStatus('锁定思考深度', `直接点击 [${directLeaf.label}]...`);
+          await activateCdkMenuItem(directLeaf.element);
+          await sleep(350);
+        }
         thinkingLocked = true;
-        finalModelLabel = getCleanElementText(currentSwitcherBtn) || finalModelLabel;
       } else {
-        // 如果当前主菜单未打开，点击模型药丸呼出主菜单
-        if (getOpenOverlayMenuPanes().length === 0 && currentSwitcherBtn) {
-          simulateRealClick(currentSwitcherBtn);
-          await sleep(300);
+        // 2b. 探测“思考等级 ▶”触发器并展开二级子菜单
+        let subTrigger = null;
+        const trigWaitStart = Date.now();
+        while (Date.now() - trigWaitStart < 2500) {
+          subTrigger = findThinkingSubmenuTriggerInOverlay();
+          if (subTrigger) break;
+          await sleep(100);
         }
 
-        // 2a. 先检查浮层内是否已经直接可见“高 / 超级详尽”选项
-        let directLeaf = findThinkingTierLeafOption(targetTier);
-        if (directLeaf) {
-          if (!directLeaf.alreadySelected) {
-            await activateCdkMenuItem(directLeaf.element);
-            await sleep(300);
-          }
-          thinkingLocked = true;
+        if (subTrigger) {
+          reportStatus('展开思考设置', '定位到 [思考等级] 选项，展开二级菜单...');
+          thinkingLocked = await expandSubmenuAndSelectTier(subTrigger, targetTier);
         } else {
-          // 2b. 在主菜单底部定位“思考等级 ▶”触发器，悬停展开二级子菜单并点击“高 / 超级详尽”
-          let subTrigger = null;
-          const trigWaitStart = Date.now();
-          while (Date.now() - trigWaitStart < 2000) {
-            subTrigger = findThinkingSubmenuTriggerInOverlay();
-            if (subTrigger) break;
-            await sleep(100);
-          }
-
-          if (subTrigger) {
-            thinkingLocked = await expandSubmenuAndSelectTier(subTrigger, targetTier);
-          }
+          reportStatus('⚠️ 提示', '未在菜单中识别到独立思考等级触发器');
         }
+      }
+
+      if (thinkingLocked && currentCid) {
+        sessionHighThinkingLockedChatId = currentCid;
       }
     } catch (err) {
       console.warn('[Argon-Bridge] Model/Thinking lock warning:', err);
     } finally {
       // ---------------------------------------------------------------------
-      // Pass 3：无论成功或异常，强制执行多轮栈式拆解，确保所有 CDK 浮层 100% 关闭
+      // Pass 3：强制执行多轮栈式拆解，确保所有 CDK 浮层 100% 彻底干净收起
       // ---------------------------------------------------------------------
       await closeActiveOverlays();
     }
 
     // -----------------------------------------------------------------------
-    // Pass 4：最终回读底部模型药丸进行状态确认（如 "Argon 高"）并归还输入框焦点
+    // Pass 4：归还输入框焦点，准备接收并注入 Prompt
     // -----------------------------------------------------------------------
     const finalBtn = findModelSwitcherButton();
     if (finalBtn) {
       const updatedPillText = getCleanElementText(finalBtn);
       if (updatedPillText) {
         finalModelLabel = updatedPillText;
-      }
-      if (isModelPillShowingHigh(finalBtn)) {
-        thinkingLocked = true;
       }
     }
 
@@ -1336,8 +1277,8 @@
     reportStatus(
       `双锁就绪: [${finalModelLabel}]`,
       thinkingLocked
-        ? `已锁定 ${targetTier.toUpperCase()} (超级详尽) 思考等级，浮层已清理`
-        : `主模型已就绪 (${finalModelLabel})`
+        ? `已确认锁定 ${targetTier.toUpperCase()} (超级详尽) 深度思考`
+        : `以当前档位 (${finalModelLabel}) 执行`
     );
 
     return {
