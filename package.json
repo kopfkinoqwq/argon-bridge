@@ -1,7 +1,7 @@
 {
   "name": "argon-bridge",
   "version": "3.2.0",
-  "description": "Zero-bloat WebSocket bridge with Model & High-Thinking lock, Zero-Reflow streaming, and 1:1 Project-to-Chat session mapping for Web Gemini 4 Argon",
+  "description": "Zero-bloat WebSocket bridge with 1:1 Project-to-Chat routing, High Thinking Lock, and Dual-Mode Fallback Policy Switch",
   "main": "ask_argon.js",
   "bin": {
     "ask-argon": "./ask_argon.js",
@@ -9,8 +9,11 @@
   },
   "scripts": {
     "ask": "node ask_argon.js",
+    "status": "node ask_argon.js --status",
     "sessions": "node ask_argon.js --list",
-    "test:ping": "node ask_argon.js \"请确认当前项目的专属会话绑定状态，并回复：Argon Bridge v2.0 1:1 会话路由正常。\""
+    "fallback:ask": "node ask_argon.js --set-fallback ask",
+    "fallback:auto": "node ask_argon.js --set-fallback auto",
+    "test:ping": "node ask_argon.js \"请确认收到请求，并简短回复：Argon Bridge v3.2 链路与回退策略守卫运行正常。\""
   },
   "dependencies": {
     "ws": "^8.18.0"
